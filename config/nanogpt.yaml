@@ -1,0 +1,66 @@
+project:
+  name: ARO-${model.name}-oss
+
+compute_env:
+  compute_target: local
+  nproc_per_node: 4
+  nodes: 1
+  accelerator: cuda
+
+model:
+  # GPT-2 124M
+  name: nanogpt
+  n_layer: 12
+  n_head: 12
+  n_embd: 768
+  vocab_size: 50304 # vocabulary 50257 padded up to nearest multiple of 64 for efficiency
+  sequence_len: 1024
+  bias: false # true: bias in Linears and LayerNorms, like GPT-2. false: a bit better and faster
+  dropout: 0.0
+
+training:
+  batch_size: 12
+  max_iters: 2600
+  gradient_accumulation_steps: 80 # 5 * 4 GPUs for DDP
+  grad_clip: 1.0
+  precision: bfloat16
+  strategy: ddp
+  log_interval: 10
+  eval_interval: 100
+  compile_model: true
+
+optimizer:
+  name: mixed-arosinkhorn # mixed-aroadam mixed-arosinkhorn aroadam arosinkhorn adamw
+  lr: 2e-3
+  weight_decay: 0.1
+  alpha: 0.2
+  momentum: 0.95
+  eps: 1e-8
+  constant_norm: true
+  update_freq: 1
+  sinkhorn_steps: 5 # for arosinkhorn
+  betas:
+    # for aroadam
+    - 0.0
+    - 0.99
+  u_processor:
+    name: scqr # scqr polar
+    rotation_jitter: 1e-9 # only for scqr; try 1e-7 if QR fallback is very frequent
+
+lr_scheduler:
+  name: linear-cosine
+  warmup_iters: 200
+  min_lr: 2e-4
+  lr_decay_iters: 2600
+
+logger:
+  project: ${project.name}
+  entity: optim
+  run_name: ${optimizer.name}-${optimizer.lr}_lr-${optimizer.momentum}Mom-${training.batch_size}bs-${training.gradient_accumulation_steps}acc-${model.sequence_len}ctx
+
+data:
+  name: owt
+  eval_size: 200
+  path: data/openwebtext
+
+seed: 1337

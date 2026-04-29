@@ -1,0 +1,40 @@
+[project]
+name = "trainer"
+license = "MIT"
+dynamic = ["version"]
+description = ""
+requires-python = ">=3.12"
+dependencies = [
+    "aro",
+    "click",
+    "devtools",
+    "flash-attn",
+    "hydra-core",
+    "gpt",
+    "numpy",
+    "omegaconf",
+    "pandas",
+    "pydantic",
+    "rats-apps",
+    "torch==2.9.0",
+    "torchmetrics",
+    "wandb",
+]
+
+[tool.uv.sources]
+aro = { workspace = true }
+gpt = { workspace = true }
+
+[build-system]
+requires = ["hatchling", "uv-dynamic-versioning"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/trainer"]
+
+[tool.hatch.version]
+source = "uv-dynamic-versioning"
+
+[tool.uv-dynamic-versioning]
+fallback-version = "0.0.0"
+bump = true

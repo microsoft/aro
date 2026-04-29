@@ -1,0 +1,23 @@
+name: Clean-up Disk
+description: |
+  Clean up disk space by removing unused applications.
+
+runs:
+  using: composite
+  steps:
+    - id: measure-disk-space
+      shell: bash
+      run: |
+        df -h
+
+    - id: free-disk-space
+      shell: bash
+      run: |
+        sudo docker system prune -af
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /usr/share/swift /opt/ghc
+        sudo apt-get clean
+
+    - id: measure-disk-after-cleanup
+      shell: bash
+      run: |
+        df -h

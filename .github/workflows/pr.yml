@@ -1,0 +1,27 @@
+name: pr
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  precommit:
+    uses: ./.github/workflows/precommit.yml
+    permissions:
+      contents: read
+
+  tests:
+    uses: ./.github/workflows/tests.yml
+    permissions:
+      contents: read
+
+  wheels:
+    uses: ./.github/workflows/wheels.yml
+    permissions:
+      contents: read
+      actions: write
+      id-token: write

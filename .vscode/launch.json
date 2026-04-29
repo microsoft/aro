@@ -1,0 +1,38 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "trainer",
+            "type": "debugpy",
+            "request": "launch",
+            "program": ".venv/bin/torchrun",
+            "args": [
+                "--standalone",
+                "--nproc_per_node=1",
+                "-m",
+                "trainer.pretrain",
+                "--cfg",
+                "nanogpt",
+                "--",
+                "logger=null",
+                "training.max_iters=20",
+                "training.gradient_accumulation_steps=2",
+                "training.log_interval=1"
+            ]
+        },
+        {
+            "name": "Debug Test",
+            "type": "debugpy",
+            "request": "launch",
+            "justMyCode": true,
+            "program": "${file}",
+            "purpose": [
+                "debug-test"
+            ],
+            "console": "integratedTerminal"
+        }
+    ]
+}

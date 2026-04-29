@@ -1,0 +1,52 @@
+name: run-tests
+
+on:
+  workflow_call:
+
+jobs:
+  run-tests:
+    runs-on: ubuntu-latest
+    name: run-tests
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/clean-disk
+        id: clean-disk
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.11"
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          uv sync
+        env:
+          UV_LINK_MODE: copy
+
+      - name: ruff-check
+        run: |
+          uv run --no-sync ruff check --no-fix --output-format=github
+
+      - name: ruff-format
+        run: |
+          uv run --no-sync ruff format --check
+
+      - name: pyright
+        run: |
+          uv run --no-sync pyright
+
+      - name: codespell
+        run: |
+          uv run --no-sync codespell
+
+      - name: pytest
+        run: |
+          uv run --no-sync pytest
