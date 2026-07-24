@@ -21,14 +21,15 @@ dev = [
     "pyright",
     "pytest",
     "pytest-cov",
-    "trainer",
+    "zizmor",
 ]
+trainer = ["trainer"]
 
 [project.urls]
 repository = "https://github.com/microsoft/aro"
 
 [tool.uv]
-default-groups = ["dev"]
+default-groups = ["dev", "trainer"]
 constraint-dependencies = [
     "aiohttp>=3.14.1",
     "azure-core>=1.38.0",
