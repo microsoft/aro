@@ -19,7 +19,6 @@ jobs:
 
   wheels:
     uses: ./.github/workflows/wheels.yml
-    secrets: inherit
     permissions:
       contents: read
       actions: write
