@@ -16,7 +16,7 @@ dependencies = [
     "pandas",
     "pydantic",
     "rats-apps",
-    "torch==2.9.0",
+    "torch",
     "torchmetrics",
     "wandb",
 ]

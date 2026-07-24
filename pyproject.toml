@@ -29,11 +29,10 @@ repository = "https://github.com/microsoft/aro"
 
 [tool.uv]
 default-groups = ["dev"]
-no-build-isolation-package = ["flash-attn"]
 constraint-dependencies = [
-    "aiohttp>=3.13.4",
+    "aiohttp>=3.14.1",
     "azure-core>=1.38.0",
-    "azure-identity==1.17.1",
+    "azure-identity>=1.17.1",
     "filelock>=3.20.3",
     "fonttools>=4.61.0",
     "grpcio>=1.53.2",
@@ -42,47 +41,69 @@ constraint-dependencies = [
     "mpmath>=1.3.0",
     "numexpr>=2.8.5",
     "paramiko>=3.4.1",
-    "pillow>=12.1.1",
+    "pillow>=12.2.0",
     "protobuf>=6.33.5",
     "pyarrow>=14.0.1",
     "pyasn1>=0.6.3",
     "pycryptodomex>=3.19.1",
     "pygments>=2.15.0",
     "pyserini>=1.5.0",
-    "python-multipart>=0.0.22",
+    "python-multipart>=0.0.31",
     "reportlab>=3.6.13",
     "requests>=2.33.0",
     "setuptools>=80.10.0",
-    "starlette>=0.49.1",
+    "starlette>=1.3.1",
     "torch>=2.8.0",
     "tqdm>=4.66.4",
-    "urllib3>=2.6.3",
-    "wandb>=0.26.1",
+    "urllib3>=2.7.0",
+    "wandb>=0.28.0",
     "werkzeug>=3.1.5",
     "wheel>=0.46.2",
     "black>=26.3.1",
-    "cryptography>=46.0.7",
+    "cryptography>=48.0.1",
     "jaraco-context>=6.1.0",
     "mlflow>=3.11.1",
     "nbconvert>=7.17.0",
     "nltk>=3.9.4",
     "orjson>=3.11.6",
     "poetry>=2.3.3",
-    "pyjwt>=2.12.0",
-    "tornado>=6.5.5",
-    "vllm>=0.14.1",
+    "pyjwt>=2.13.0",
+    "tornado>=6.5.7",
+    "vllm>=0.22.0",
     "xgrammar>=0.1.32",
+    "bleach>=6.4.0",
+    "click>=8.3.3",
+    "diffusers>=0.38.0",
+    "dulwich>=1.2.5",
+    "gitpython>=3.1.49",
+    "idna>=3.15",
+    "jupyterlab>=4.5.7",
+    "lxml>=6.1.0",
+    "mako>=1.3.11",
+    "mistune>=3.2.1",
+    "pdm>=2.27.0",
+    "pip>=26.1",
+    "py-rattler>=0.24.0",
+    "pyopenssl>=26.0.0",
+    "ray>=2.55.1",
+    "safetensors>=0.8.0rc0",
+    "transformers>=5.0.0rc3",
 ]
 
 [tool.uv.extra-build-dependencies]
-flash-attn = [{ requirement = "torch", match-runtime = true }]
+flash-attn = [{ requirement = "torch", match-runtime = true }, "ninja"]
 
-[tool.uv.extra-build-variables]
-flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE" }
+# [tool.uv.extra-build-variables]
+# flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE" }
+
+[[tool.uv.index]]
+name = "mspypi"
+url = "https://packagefeedproxy.microsoft.io/pypi/simple"
+default = true
 
 [[tool.uv.index]]
 name = "torchcuda"
-url = "https://download.pytorch.org/whl/cu128"
+url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [tool.uv.sources]
