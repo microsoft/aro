@@ -30,7 +30,7 @@ Our default in the paper uses AroSinkhorn, which provides robust overall perform
 Add `aro` to your project dependencies, e.g., if using `uv`:
 
 ```bash
-uv add aro
+uv add "aro @ git+https://github.com/microsoft/aro"
 ```
 
 ## :bulb: Training example
