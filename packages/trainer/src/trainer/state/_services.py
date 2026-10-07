@@ -9,8 +9,9 @@ from trainer.optim import OptimContainer, OptimServices
 
 from ._defs import TrainingState
 from ._full import FullState
+from ._sharded import ShardedState
 
-STRATEGY = Literal["none", "ddp"]
+STRATEGY = Literal["none", "ddp", "fsdp", "fsdp2"]
 
 
 @apps.autoscope
@@ -52,4 +53,14 @@ class StateContainer(apps.Container):
         optimizers = self._optim_container.get(OptimServices.OPTIMIZERS)
         schedulers = self._optim_container.get(OptimServices.SCHEDULERS)
         state = FullState(step, model, optimizers, schedulers)
+        return state.resume_from_checkpoint_if_exists(self._config.checkpoint_path / "latest.pt")
+
+    @apps.service(_PrivateServices.strategy("fsdp"))
+    @apps.service(_PrivateServices.strategy("fsdp2"))
+    def _sharded_state(self) -> ShardedState:
+        step = 0
+        model = self._model_container.get(ModelServices.DISTRIBUTED_MODEL)
+        optimizers = self._optim_container.get(OptimServices.OPTIMIZERS)
+        schedulers = self._optim_container.get(OptimServices.SCHEDULERS)
+        state = ShardedState(step, model, optimizers, schedulers)
         return state.resume_from_checkpoint_if_exists(self._config.checkpoint_path / "latest.pt")

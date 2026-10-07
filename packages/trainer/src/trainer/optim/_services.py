@@ -189,7 +189,7 @@ class _MixedOptimizerContainer(apps.Container):
 
     def _get_mixed_params_and_adamw(self) -> tuple[list[nn.Parameter], AdamW]:
         model = self._model_container.get(ModelServices.DISTRIBUTED_MODEL)
-        model = cast(nn.Module, model.module if isinstance(model, (DDP)) else model)
+        model = cast(nn.Module, model.module if isinstance(model, DDP) else model)
         head_params = self.get(_PrivateServices.head_params(self._config.model.name))
         oned_params = [p for p in model.parameters() if p.requires_grad and p.ndim == 1]
         adamw_params = head_params + oned_params
