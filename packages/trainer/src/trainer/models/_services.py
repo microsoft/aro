@@ -104,7 +104,11 @@ class ModelContainer(apps.Container):
             fully_shard(layer, mp_policy=mp_policy)
         if hasattr(model.transformer, "wpe"):
             fully_shard(model.transformer.wpe, mp_policy=mp_policy)  # type: ignore
-        fully_shard(model.lm_head, mp_policy=mp_policy)
+        token_embedding = cast(nn.Embedding, model.transformer.wte)
+        if token_embedding.weight is model.lm_head.weight:
+            fully_shard([token_embedding, model.lm_head], mp_policy=mp_policy)
+        else:
+            fully_shard(model.lm_head, mp_policy=mp_policy)
         fully_shard(model, mp_policy=mp_policy)
         return cast(FSDP2, model)
 
