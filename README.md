@@ -122,6 +122,14 @@ torchrun --standalone --nproc_per_node=4 -m trainer.pretrain --cfg nanogpt -- op
 
 Configuration values are validated with pydantic at runtime.
 
+Use `training.strategy=fsdp2` to run with FSDP2 instead of DDP. NanoGPT's tied
+token embedding and language-model head are sharded together in one FSDP group
+to preserve weight sharing.
+
+CUDA ARO optimizers use round-robin matrix ownership with both DDP and FSDP2:
+each rank computes rotation updates for its assigned matrices and distributes
+the updates to the other ranks. CPU execution uses local updates.
+
 ## :compass: Practical usage and benchmarking guidelines
 
 
