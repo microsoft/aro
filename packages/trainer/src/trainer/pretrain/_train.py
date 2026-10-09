@@ -1,5 +1,6 @@
 import logging
 import os
+from contextlib import nullcontext
 from typing import Any
 
 import torch
@@ -79,12 +80,13 @@ class TrainContainer(apps.Container):
         accelerator = self._config.compute_env.accelerator
         eval_interval = self._config.training.eval_interval
         ckpt_interval = self._config.training.checkpoint_interval
+        use_fsdp = self._config.training.strategy in {"fsdp", "fsdp2"}
         non_blocking = self._config.data.pin_memory and torch.cuda.is_available()
         precision = self._config.training.precision
         dtype = {"bfloat16": torch.bfloat16, "float16": torch.float16}[precision]
         output_dir = self._config.compute_env.output_dir
         output_dir.mkdir(parents=True, exist_ok=True)
-        ckpt_enabled = ckpt_interval > 0 and (world_size == 1 or rank == 0)
+        ckpt_enabled = ckpt_interval > 0 and (world_size == 1 or rank == 0 or use_fsdp)
         ckpt_path = self._config.training.checkpoint_path
         ckpt_path.mkdir(parents=True, exist_ok=True)
 
@@ -143,7 +145,7 @@ class TrainContainer(apps.Container):
                 for data in val_dataloader:  # eval_iters
                     X_val, Y_val = to_device(data, device, non_blocking=non_blocking)
                     with torch.no_grad():
-                        with torch.autocast(accelerator, dtype):
+                        with nullcontext() if use_fsdp else torch.autocast(accelerator, dtype):
                             val_loss = parse_loss(model(X_val, Y_val))
                         self._val_losses.update(val_loss)
                 val_loss = self._val_losses.compute()
@@ -167,7 +169,7 @@ class TrainContainer(apps.Container):
                         X, Y = next(train_iterator)
                         X, Y = to_device([X, Y], device, non_blocking=non_blocking)
                         with distributed_grad_sync(model, sync=is_last):
-                            with torch.autocast(accelerator, dtype):
+                            with nullcontext() if use_fsdp else torch.autocast(accelerator, dtype):
                                 loss = parse_loss(model(X, Y))
                                 loss = loss / gradient_acc_steps
                             scaler.scale(loss).backward()

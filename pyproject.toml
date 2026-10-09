@@ -92,15 +92,10 @@ constraint-dependencies = [
 ]
 
 [tool.uv.extra-build-dependencies]
-flash-attn = [{ requirement = "torch", match-runtime = true }, "ninja"]
+flash-attn = ["torch", "ninja"]
 
 # [tool.uv.extra-build-variables]
 # flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE" }
-
-[[tool.uv.index]]
-name = "mspypi"
-url = "https://packagefeedproxy.microsoft.io/pypi/simple"
-default = true
 
 [[tool.uv.index]]
 name = "torchcuda"
@@ -108,6 +103,7 @@ url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [tool.uv.sources]
+flash-attn = { git = "https://github.com/Dao-AILab/flash-attention", rev = "94e22c906678e5483fa0e9e24d8e787bc2c0ed4c" }
 gpt = { workspace = true }
 trainer = { workspace = true }
 torch = { index = "torchcuda" }
