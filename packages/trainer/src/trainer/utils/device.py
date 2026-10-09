@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import torch.utils._pytree as pytree
 from torch import memory_format
+from torch.distributed.fsdp import FSDPModule
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.nn.parallel import DistributedDataParallel as DDP
 
@@ -14,6 +15,9 @@ type TS = dict[str, TS] | list[TS] | torch.Tensor | float | int | None
 DeviceLikeType = str | torch.device | int
 
 logger = logging.getLogger(__name__)
+
+
+class FSDP2(nn.Module, FSDPModule): ...
 
 
 def log_on_main_worker(message: str, *args: Any, level: int = logging.INFO):
@@ -48,14 +52,19 @@ def get_device() -> torch.device:
 
 
 @contextlib.contextmanager
-def distributed_grad_sync(model: nn.Module | DDP, sync: bool):
+def distributed_grad_sync(model: nn.Module | DDP | FSDP | FSDP2, sync: bool):
     """Context manager that disables gradient sync on the model if requested.
 
-    Works with non-distributed and DDP/FSDP classic.
+    Works with DDP, classic FSDP, and composable FSDP2.
     """
     if hasattr(model, "require_backward_grad_sync"):
         assert isinstance(model, DDP) or isinstance(model, FSDP)
         model.require_backward_grad_sync = sync  # type: ignore
+        yield
+        return
+
+    if callable(getattr(model, "set_requires_gradient_sync", None)):
+        model.set_requires_gradient_sync(sync)  # type: ignore
         yield
         return
 

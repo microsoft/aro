@@ -5,6 +5,7 @@ from typing import Any, Literal, cast
 import torch
 import torch.nn as nn
 from rats import apps
+from torch.distributed.fsdp import FSDPModule, MixedPrecisionPolicy, fully_shard
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from gpt import NanoChatGPT, NanoGPT
@@ -17,7 +18,10 @@ from ._backend import sdpa_probe
 MODEL_TYPE = NanoChatGPT | NanoGPT
 MODEL_CONF = GPT_CONF
 MODEL_NAME = Literal["nanochat", "nanogpt"]
-STRATEGY = Literal["none", "ddp"]
+STRATEGY = Literal["none", "ddp", "fsdp", "fsdp2"]
+
+
+class FSDP2(nn.Module, FSDPModule): ...
 
 
 logger = logging.getLogger(__name__)
@@ -35,8 +39,12 @@ class _PrivateServices:
         return apps.ServiceId[MODEL_TYPE](f"{name}-net")
 
     @staticmethod
-    def strategy(name: STRATEGY) -> apps.ServiceId[MODEL_TYPE | DDP]:
-        return apps.ServiceId[MODEL_TYPE | DDP](f"{name}-wrapped-model")
+    def model_shard(name: MODEL_NAME) -> apps.ServiceId[FSDP2]:
+        return apps.ServiceId[FSDP2](f"{name}-fsdp-net")
+
+    @staticmethod
+    def strategy(name: STRATEGY) -> apps.ServiceId[MODEL_TYPE | DDP | FSDP2]:
+        return apps.ServiceId[MODEL_TYPE | DDP | FSDP2](f"{name}-wrapped-model")
 
     @staticmethod
     def flops_per_token(name: MODEL_NAME) -> apps.ServiceId[float]:
@@ -48,7 +56,7 @@ class _PrivateServices:
 @apps.autoscope
 class ModelServices:
     RAW_MODEL = apps.ServiceId[MODEL_TYPE]("raw-model")
-    DISTRIBUTED_MODEL = apps.ServiceId[MODEL_TYPE | DDP]("distributed-model")
+    DISTRIBUTED_MODEL = apps.ServiceId[MODEL_TYPE | DDP | FSDP2]("distributed-model")
     NUM_PARAMETERS = apps.ServiceId[int]("num-parameters")
     FLOPS_PER_TOKEN = apps.ServiceId[float]("flops-per-token")
     ATTENTION_BACKEND = apps.ServiceId[None]("attention-backend")
@@ -70,7 +78,7 @@ class ModelContainer(apps.Container):
         return model
 
     @apps.service(ModelServices.DISTRIBUTED_MODEL)
-    def _distributed_model(self) -> MODEL_TYPE | DDP:
+    def _distributed_model(self) -> MODEL_TYPE | DDP | FSDP2:
         return self.get(_PrivateServices.strategy(self._training_conf.strategy))
 
     @apps.service(_PrivateServices.model("nanogpt"))
@@ -87,6 +95,23 @@ class ModelContainer(apps.Container):
         model.to(get_device())
         return model
 
+    @apps.service(_PrivateServices.model_shard("nanogpt"))
+    @apps.service(_PrivateServices.model_shard("nanochat"))
+    def _fsdp2_nano_models(self) -> FSDP2:
+        model = self.get(ModelServices.RAW_MODEL)
+        mp_policy = self._mixed_precision_policy()
+        for layer in model.transformer.h:  # type: ignore
+            fully_shard(layer, mp_policy=mp_policy)
+        if hasattr(model.transformer, "wpe"):
+            fully_shard(model.transformer.wpe, mp_policy=mp_policy)  # type: ignore
+        token_embedding = cast(nn.Embedding, model.transformer.wte)
+        if token_embedding.weight is model.lm_head.weight:
+            fully_shard([token_embedding, model.lm_head], mp_policy=mp_policy)
+        else:
+            fully_shard(model.lm_head, mp_policy=mp_policy)
+        fully_shard(model, mp_policy=mp_policy)
+        return cast(FSDP2, model)
+
     @apps.service(_PrivateServices.strategy("none"))
     def _non_distributed_model(self) -> MODEL_TYPE:
         model = self.get(ModelServices.RAW_MODEL)
@@ -102,6 +127,20 @@ class ModelContainer(apps.Container):
             log_on_main_worker("Compiling DDP model... (takes ~1 minute)")
             model = torch.compile(model, dynamic=False)
         return DDP(model)
+
+    @apps.service(_PrivateServices.strategy("fsdp"))
+    @apps.service(_PrivateServices.strategy("fsdp2"))
+    def _fsdp2_wrapped_model(self) -> FSDP2:
+        model = self.get(_PrivateServices.model_shard(self._model_conf.name))
+        if self._training_conf.compile_model:
+            log_on_main_worker("Compiling FSDP2 model... (takes ~1 minute)")
+            model = torch.compile(model, dynamic=False)
+        return cast(FSDP2, model)
+
+    def _mixed_precision_policy(self) -> MixedPrecisionPolicy:
+        precision = self._training_conf.precision
+        dtype = {"bfloat16": torch.bfloat16, "float16": torch.float16}[precision]
+        return MixedPrecisionPolicy(param_dtype=dtype, reduce_dtype=dtype)
 
     @apps.container()
     def _model_info_container(self) -> "InfoModelContainer":
