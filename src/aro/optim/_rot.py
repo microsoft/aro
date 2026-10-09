@@ -175,9 +175,9 @@ class AroBase(Optimizer):
         self._rot_processor = rot_processor
 
         first_param = next(chain.from_iterable(pg["params"] for pg in self.param_groups))
-        use_fsdp_cuda = isinstance(first_param, DTensor) and first_param.device.type == "cuda"
-        self._comm_stream = torch.cuda.Stream() if use_fsdp_cuda else None
-        self._comp_stream = torch.cuda.Stream() if use_fsdp_cuda else None
+        use_cuda = first_param.device.type == "cuda"
+        self._comm_stream = torch.cuda.Stream() if use_cuda else None
+        self._comp_stream = torch.cuda.Stream() if use_cuda else None
 
         # Per-parameter persistent state (same keys you already use)
         for pg in self.param_groups:
