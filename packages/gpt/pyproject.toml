@@ -1,31 +1,18 @@
 [project]
 name = "gpt"
 license = "MIT"
-dynamic = ["version"]
+version = "0.0.0"
 description = ""
 requires-python = ">=3.12"
 dependencies = [
     "datasets",
-    "flash-attention",
+    "flash-attn",
     "kernels",
     "pydantic",
     "tiktoken",
     "torch",
 ]
 
-[tool.uv.sources]
-aro = { workspace = true }
-
 [build-system]
-requires = ["hatchling", "uv-dynamic-versioning"]
-build-backend = "hatchling.build"
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/dataprep", "src/gpt"]
-
-[tool.hatch.version]
-source = "uv-dynamic-versioning"
-
-[tool.uv-dynamic-versioning]
-fallback-version = "0.0.0"
-bump = true
+requires = ["uv_build"]
+build-backend = "uv_build"
