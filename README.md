@@ -143,6 +143,84 @@ For fair and informative benchmarks, we recommend aligning optimization settings
 
     For readers interested in related follow-up discussions and extensions, Kexue.fm has a nice series, for example https://kexue.fm/archives/11654 and https://kexue.fm/archives/11710.
 
+## ROM: fixed-rank adapter optimization
+
+ROM is available through `aro.lora.FixedRankRGD`. It optimizes the adapter product
+`A @ diag(D) @ B.T` on the embedded fixed-rank manifold, rather than differentiating
+the individual factors. The implementation uses low-rank gradient projections and
+a small SVD retraction, without materializing a dense adapter gradient.
+
+This self-contained CPU example also works on CUDA after moving the model and inputs:
+
+```python
+import torch
+from torch import nn
+
+from aro.lora import FixedRankRGD, LoRAADBLinear, apply_adb_lora, merged_adapters
+
+torch.manual_seed(0)
+model = nn.Sequential(nn.Linear(8, 8), nn.Tanh(), nn.Linear(8, 4))
+model.requires_grad_(False)
+apply_adb_lora(model, rank=2)
+adapters = [module for module in model.modules() if isinstance(module, LoRAADBLinear)]
+optimizer = FixedRankRGD(adapters, lr=0.01, momentum=0.9)
+inputs, targets = torch.randn(16, 8), torch.randn(16, 4)
+
+try:
+    for _ in range(20):
+        optimizer.zero_grad()
+        # Factors are frozen: inputs must require grad so the capture hooks run.
+        predictions = model(inputs.detach().requires_grad_(True))
+        loss = nn.functional.mse_loss(predictions, targets)
+        loss.backward()
+        optimizer.step()
+
+    model.eval()
+    with torch.no_grad(), merged_adapters(model):
+        predictions = model(inputs)
+finally:
+    optimizer.remove_hooks()
+```
+
+For pretrained models, `apply_adb_lora` replaces linear descendants in place and
+copies their frozen weights and biases. Use its `exclude(name, module)` callback
+to skip layers such as the output head. Other parameters are not frozen by the
+helper; freeze the model first for adapter-only training. For a single linear layer,
+use `LoRAADBLinear.from_linear`. Every adapted layer requires
+`0 < 2 * rank <= min(in_features, out_features)`. Adapters start near, not exactly at,
+the pretrained function (`d_init=1e-3` by default).
+
+**Conditioning.** The default is plain Riemannian gradient descent. Opt into
+spectral whitening with `conditioning="spectral"`; add `sinkhorn_steps=2` for reduced
+Sinkhorn balancing. Optional `frame_update="qr"` or `"polar"` refines the frame;
+`track_frame=True` carries it across steps (tracking with `"qr"` requires positive
+Sinkhorn steps). `rms_normalize=True` independently normalizes the step. Retune the
+learning rate when changing conditioning, normalization, or adapter rank.
+
+**Training integration.** With frozen embeddings, enable input gradients before
+training (for example, `model.enable_input_require_grads()` in compatible model
+libraries). Accumulated gradients are consumed by `step()` and cleared by
+`zero_grad()`; average microbatch losses or set `gradient_divisor` explicitly.
+Factor `.grad` values are always `None`, so standard factor-gradient clipping and
+`GradScaler.step(optimizer)` do not apply. For loss-scaled backward passes, supply
+`optimizer.step(grad_scale=...)` and use `optimizer.found_non_finite` to manage the
+loss scale explicitly. Call `remove_hooks()` when discarding the optimizer.
+
+**Evaluation and checkpoints.** `disabled_adapters(model)` temporarily evaluates
+the frozen base model; `merged_adapters(model)` caches effective weights for
+evaluation only. Both restore entry states, including nested contexts. Save both
+`model.state_dict()` and `optimizer.state_dict()`, then reconstruct the same adapter
+layout and optimizer options before loading both. If you load only model weights
+into an existing optimizer, call `resync_from_modules()` to reset its fp32 master
+state, momentum, and tracked frames.
+
+**Distributed training.** Factors must be replicated and initialized identically
+across ranks. ROM all-reduces its captured projections and averages over the process
+group by default; it does not rely on DDP factor gradients. FSDP2 may shard frozen
+base weights, but factors must be excluded from sharding at every level, placed on
+the compute device, and synchronized before constructing the optimizer. Sharded
+adapter factors are not supported.
+
 ## :package: Dependencies
 
 The only direct python dependency of `aro` library is `torch`.
