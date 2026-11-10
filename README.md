@@ -11,6 +11,10 @@ ARO is a library of Pytorch optimizers for LLM training. For more details, see o
 
 **[ARO: A New Lens On Matrix Optimization For Large Models](https://arxiv.org/abs/2602.090062)**
 
+For low-rank adaptation (LoRA), the library also includes
+[RoM (Rotated Manifold Optimization)](#rom-rotated-manifold-optimization-for-low-rank-adaptation),
+introduced in **[Rotated Manifold Optimization for Low-Rank Adaptation](https://arxiv.org/abs/2609.34264)**.
+
 It includes a range of advanced optimizers designed to improve training efficiency and model performance.
 These optimizers process and rotate gradients prior to updating model parameters, leveraging
 structures from the model architecture.
@@ -143,12 +147,24 @@ For fair and informative benchmarks, we recommend aligning optimization settings
 
     For readers interested in related follow-up discussions and extensions, Kexue.fm has a nice series, for example https://kexue.fm/archives/11654 and https://kexue.fm/archives/11710.
 
-## ROM: fixed-rank adapter optimization
+## RoM: Rotated Manifold Optimization for low-rank adaptation
 
-ROM is available through `aro.lora.FixedRankRGD`. It optimizes the adapter product
+RoM extends matrix optimizers to the manifold of fixed-rank matrices by combining
+rotation and normalization, accounting for the gauge symmetry of low-rank
+factorization. See the paper,
+**[Rotated Manifold Optimization for Low-Rank Adaptation](https://arxiv.org/abs/2609.34264)**,
+for the method and experiments.
+
+The implementation is available through `aro.lora.FixedRankRGD`. It optimizes the adapter product
 `A @ diag(D) @ B.T` on the embedded fixed-rank manifold, rather than differentiating
 the individual factors. The implementation uses low-rank gradient projections and
 a small SVD retraction, without materializing a dense adapter gradient.
+
+**Quick start.** Install `aro` as above, freeze the base model, replace its linear
+layers with `apply_adb_lora`, and pass the adapter modules (not their parameters)
+to `FixedRankRGD`. Enable input gradients, then use `zero_grad()`, `backward()`,
+and `step()` in your training loop. The example below uses plain Riemannian gradient
+descent; see **Conditioning** below to enable rotation and normalization options.
 
 This self-contained CPU example also works on CUDA after moving the model and inputs:
 
@@ -215,7 +231,7 @@ into an existing optimizer, call `resync_from_modules()` to reset its fp32 maste
 state, momentum, and tracked frames.
 
 **Distributed training.** Factors must be replicated and initialized identically
-across ranks. ROM all-reduces its captured projections and averages over the process
+across ranks. RoM all-reduces its captured projections and averages over the process
 group by default; it does not rely on DDP factor gradients. FSDP2 may shard frozen
 base weights, but factors must be excluded from sharding at every level, placed on
 the compute device, and synchronized before constructing the optimizer. Sharded
@@ -254,5 +270,18 @@ If you use ARO in your research, please cite:
   author={Gong, Wenbo and Zazo, Javier and Luo, Qijun and Wang, Puqian and Hensman, James and Ma, Chao},
   journal={arXiv preprint arXiv:2602.09006},
   year={2026}
+}
+```
+
+If you use RoM for low-rank adaptation, please cite:
+
+```bibtex
+@article{ding2026rom,
+  title={Rotated Manifold Optimization for Low-Rank Adaptation},
+  author={Ding, Yuhui and Zazo, Javier and Hensman, James},
+  journal={arXiv preprint arXiv:2609.34264},
+  year={2026},
+  doi={10.48550/arXiv.2609.34264},
+  url={https://arxiv.org/abs/2609.34264}
 }
 ```
