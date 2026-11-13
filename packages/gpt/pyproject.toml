@@ -11,6 +11,7 @@ dependencies = [
     "pydantic",
     "tiktoken",
     "torch",
+    "transformers==5.19.0",
 ]
 
 [build-system]

@@ -1,0 +1,62 @@
+project:
+  name: SinkGD-${model.name}-pretrain
+
+compute_env:
+  nodes: 1
+  accelerator: cuda
+  output_dir: outputs/sinkgd
+
+model:
+  name: nanogpt
+  n_layer: 12
+  n_head: 12
+  n_embd: 768
+  vocab_size: 50304
+  sequence_len: 1024
+  bias: false
+  dropout: 0.0
+
+training:
+  batch_size: 2
+  max_iters: 1000
+  gradient_accumulation_steps: 24
+  grad_clip: 1.0
+  precision: bfloat16
+  strategy: fsdp2
+  compile_model: false
+  log_interval: 10
+  eval_interval: 100
+  checkpoint_interval: 0
+
+optimizer:
+  name: sinkgd
+  lr: 0.001
+  momentum: 0.95
+  nesterov: true
+  normalization: alternating
+  sinkhorn_steps: 11
+  final_row_pass: false
+  eps: 1e-20
+  row_filter_threshold: 1e-3
+  alpha: 0.2
+  constant_norm: true
+  weight_decay: 0.0
+  start_axis: row
+  adamw_betas: [0.9, 0.95]
+  adamw_eps: 1e-8
+  adamw_weight_decay: 0.1
+
+lr_scheduler:
+  name: linear-cosine
+  warmup_iters: 100
+  min_lr: 0.0001
+  lr_decay_iters: ${training.max_iters}
+
+logger: null
+
+data:
+  name: owt
+  eval_size: 24
+  path: data/openwebtext
+
+seed: 1337

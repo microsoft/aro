@@ -7,7 +7,13 @@ from pydantic.dataclasses import dataclass
 @dataclass(frozen=True)
 class SCQRConfig:
     name: Literal["scqr"] = "scqr"
-    rotation_jitter: float = 1e-9
+    rotation_jitter: float = 1e-7
+
+
+@dataclass(frozen=True)
+class CholQrConfig:
+    name: Literal["chol-qr"] = "chol-qr"
+    rotation_jitter: float = 1e-7
 
 
 @dataclass(frozen=True)
@@ -16,4 +22,4 @@ class PolarConfig:
     steps: int = 5
 
 
-U_PROCESSOR = Annotated[SCQRConfig | PolarConfig, Discriminator("name")]
+U_PROCESSOR = Annotated[SCQRConfig | CholQrConfig | PolarConfig, Discriminator("name")]

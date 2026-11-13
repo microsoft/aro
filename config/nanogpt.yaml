@@ -31,7 +31,7 @@ training:
 
 optimizer:
   name: mixed-arosinkhorn # mixed-aroadam mixed-arosinkhorn aroadam arosinkhorn adamw
-  lr: 2e-3
+  lr: 6e-4
   weight_decay: 0.1
   alpha: 0.2
   momentum: 0.95
@@ -42,16 +42,17 @@ optimizer:
   betas:
     # for aroadam
     - 0.0
-    - 0.99
+    - 0.95
   u_processor:
     name: scqr # scqr polar
     rotation_jitter: 1e-9 # only for scqr; try 1e-7 if QR fallback is very frequent
+    steps: 5 # only for polar
 
 lr_scheduler:
   name: linear-cosine
   warmup_iters: 200
-  min_lr: 2e-4
-  lr_decay_iters: 2600
+  min_lr: 6e-5
+  lr_decay_iters: ${training.max_iters}
 
 logger:
   project: ${project.name}

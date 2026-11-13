@@ -28,7 +28,7 @@ def scqr_safe_take_stats(*, reset: bool = True) -> dict[str, int]:
     return out
 
 
-def scqr_safe(A: torch.Tensor, jitter: float = 1e-9, cond_max: float = 1e12) -> torch.Tensor:
+def scqr_safe(A: torch.Tensor, jitter: float = 1e-7, cond_max: float = 1e12) -> torch.Tensor:
     """Shifted Cholesky QR with a per-batch-item QR fallback.
 
     Given an input tensor ``A`` with shape ``(*, m, n)`` (treating all leading
@@ -40,7 +40,7 @@ def scqr_safe(A: torch.Tensor, jitter: float = 1e-9, cond_max: float = 1e12) -> 
         A (torch.Tensor):
             Real-valued tensor with shape ``(*, m, n)`` and ``A.ndim >= 2``.
             All leading dimensions are treated as batch.
-        jitter (float): default=1e-9
+        jitter (float): default=1e-7
             Relative regularization added.
             Increase if you frequently see SCQR failures.
         cond_max (float): default=1e12
@@ -107,7 +107,7 @@ def scqr_safe(A: torch.Tensor, jitter: float = 1e-9, cond_max: float = 1e12) -> 
 class SCQRUpdate(UProcessor):
     """Update function for rotation matrix U using SCQR decomposition."""
 
-    def __init__(self, rotation_jitter: float = 1e-9) -> None:
+    def __init__(self, rotation_jitter: float = 1e-7) -> None:
         self._rotation_jitter = rotation_jitter
 
     def __call__(
@@ -124,3 +124,9 @@ class SCQRUpdate(UProcessor):
         f = base_processor.process_grad(utk, state_dict=sd)
         kf = k.matmul(f) if transpose_k else k.matmul(f.transpose(-1, -2))
         return scqr_safe(kf, jitter=self._rotation_jitter)
+
+
+# Compatibility names for the internal Cholesky-QR API.
+CholQrUpdate = SCQRUpdate
+chol_qr_safe = scqr_safe
+chol_qr_safe_take_stats = scqr_safe_take_stats

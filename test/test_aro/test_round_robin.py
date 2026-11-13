@@ -9,7 +9,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from aro.optim import AroSinkhorn
+from aro.optim import AroAdam, AroSign, AroSinkhorn, Muon
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
@@ -24,6 +24,20 @@ def test_optimizer_execution_path(device: str) -> None:
     optimizer.step()
     assert optimizer.state[parameter]["step"] == 1
     assert torch.isfinite(parameter).all()
+
+
+@pytest.mark.parametrize("optimizer_type", [AroAdam, AroSign, AroSinkhorn, Muon])
+@pytest.mark.parametrize("constant_norm", [False, True])
+def test_cpu_step_exposes_processed_gradient(
+    optimizer_type: type[AroAdam] | type[AroSign] | type[AroSinkhorn] | type[Muon],
+    constant_norm: bool,
+) -> None:
+    parameter = torch.nn.Parameter(torch.zeros(6, 4))
+    parameter.grad = torch.arange(24, dtype=torch.float32).reshape(6, 4) / 10
+    optimizer = optimizer_type([parameter], lr=0.05, alpha=0.2, constant_norm=constant_norm)
+    optimizer.step()
+    assert parameter.grad is not None
+    torch.testing.assert_close(parameter.grad, -parameter.detach() / (0.05 * 0.2))
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 4, reason="Requires four CUDA GPUs")

@@ -42,7 +42,7 @@ optimizer:
   betas:
     # for aroadam
     - 0.0
-    - 0.99
+    - 0.95
   u_processor:
     name: scqr # scqr polar
     rotation_jitter: 1e-9 # only for scqr; try 1e-7 if QR fallback is very frequent

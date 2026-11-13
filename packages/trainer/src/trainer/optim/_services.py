@@ -10,7 +10,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LRScheduler, SequentialLR
 
-from aro.optim import AroAdam, AroSign, AroSinkhorn, Muon
+from aro.optim import AroAdam, AroSign, AroSinkhorn, Muon, SinkGD
 from aro.processors.u import PolarUpdate, SCQRUpdate
 from gpt import NanoChatGPT, NanoGPT
 from trainer.config import BaseConfig
@@ -19,9 +19,11 @@ from trainer.config.optim import (
     AroAdamConfig,
     AroSignConfig,
     AroSinkhornConfig,
+    CholQrConfig,
     MuonConfig,
     PolarConfig,
     SCQRConfig,
+    SinkGDConfig,
 )
 from trainer.config.schedulers import SCHEDULERS, LinearCosineSchConfig, SchedulerConfig
 from trainer.models import ModelContainer, ModelServices
@@ -37,16 +39,18 @@ def log_on_main_worker(message: str, *args: Any, level: int = logging.INFO):
         logger.log(level, message, *args)
 
 
-UPDATE_U = Literal["scqr", "polar"]
+UPDATE_U = Literal["scqr", "chol-qr", "polar"]
 MODEL_NAME = Literal["nanogpt", "nanochat"]
 ARO_CONFIGS = AroSinkhornConfig | AroAdamConfig | AroSignConfig
-OPT_CONFIGS = ARO_CONFIGS | AdamWConfig | MuonConfig
+OPT_CONFIGS = ARO_CONFIGS | AdamWConfig | MuonConfig | SinkGDConfig
 OPTIMIZERS = Literal[
     "adamw",
     "arosinkhorn",
     "aroadam",
     "arosign",
     "muon",
+    "sinkgd",
+    "mixed-sinkgd",
     "mixed-arosinkhorn",
     "mixed-aroadam",
     "mixed-arosign",
@@ -55,7 +59,7 @@ OPTIMIZERS = Literal[
 
 
 def _exclude_name(d: list[tuple[str, Any]]) -> dict[str, Any]:
-    return {k: v for k, v in d if k not in ["name", "u_processor", "rank", "mode"]}
+    return {k: v for k, v in d if k not in ["name", "u_processor", "rank", "mode", "jitter"]}
 
 
 class _PrivateServices:
@@ -105,8 +109,62 @@ class OptimContainer(apps.Container):
         return _MixedOptimizerContainer(self._config, self._model_container)
 
     @apps.container()
+    def _sinkgd_container(self) -> "_SinkGDContainer":
+        return _SinkGDContainer(self._config, self._model_container)
+
+    @apps.container()
     def _schedulers_container(self) -> "SchedulersContainer":
         return SchedulersContainer(self._config, self)
+
+
+class _SinkGDContainer(apps.Container):
+    def __init__(self, config: BaseConfig, model_container: ModelContainer) -> None:
+        self._config = config
+        self._model_container = model_container
+
+    @apps.container()
+    def _common_container(self) -> "_CommonContainer":
+        return _CommonContainer(self._config, self._model_container)
+
+    @apps.service(_PrivateServices.optimizers("sinkgd"))
+    @apps.service(_PrivateServices.optimizers("mixed-sinkgd"))
+    def _optimizers(self) -> list[torch.optim.Optimizer]:
+        cfg = self._config.optimizer
+        assert isinstance(cfg, SinkGDConfig)
+        model = self._model_container.get(ModelServices.DISTRIBUTED_MODEL)
+        params = [parameter for parameter in model.parameters() if parameter.requires_grad]
+        excluded: set[int] = set()
+        if cfg.name == "mixed-sinkgd":
+            head_params = self.get(_PrivateServices.head_params(self._config.model.name))
+            excluded = {id(parameter) for parameter in head_params}
+        matrices = [
+            parameter
+            for parameter in params
+            if parameter.ndim == 2 and id(parameter) not in excluded
+        ]
+        matrix_ids = {id(parameter) for parameter in matrices}
+        other = [parameter for parameter in params if id(parameter) not in matrix_ids]
+        optimizers: list[torch.optim.Optimizer] = []
+        if other:
+            optimizers.append(
+                AdamW(
+                    other,
+                    lr=cfg.lr,
+                    betas=cfg.adamw_betas,
+                    eps=cfg.adamw_eps,
+                    weight_decay=cfg.adamw_weight_decay,
+                )
+            )
+        if matrices:
+            kwargs = {
+                key: value
+                for key, value in asdict(cfg).items()
+                if key != "name" and not key.startswith("adamw_")
+            }
+            optimizers.append(SinkGD(matrices, **kwargs))
+        if not optimizers:
+            raise ValueError("SinkGD training requires at least one trainable parameter")
+        return optimizers
 
 
 class _FullOptimizerContainer(apps.Container):
@@ -167,6 +225,15 @@ class _FullOptimizerContainer(apps.Container):
         kwargs = asdict(self._optim_cfg, dict_factory=_exclude_name)
         aroadam_opt = AroAdam(aro_params, u_processor=u_processor, **kwargs)
         return [aroadam_opt, adamw_opt]
+
+    @apps.service(_PrivateServices.optimizers("arosign"))
+    def _arosign_optimizer(self) -> list[torch.optim.Optimizer]:
+        assert isinstance(self._optim_cfg, AroSignConfig)
+        aro_params, adamw_opt = self._get_full_params_and_adamw()
+        u_processor = self.get(_PrivateServices.u_processor(self._optim_cfg.u_processor.name))
+        kwargs = asdict(self._optim_cfg, dict_factory=_exclude_name)
+        arosign_opt = AroSign(aro_params, u_processor=u_processor, **kwargs)
+        return [arosign_opt, adamw_opt]
 
     @apps.service(_PrivateServices.optimizers("muon"))
     def _muon_optimizer(self) -> list[torch.optim.Optimizer]:
@@ -258,9 +325,10 @@ class _CommonContainer(apps.Container):
         self._model_container = model_container
 
     @apps.service(_PrivateServices.u_processor("scqr"))
+    @apps.service(_PrivateServices.u_processor("chol-qr"))
     def _scqr_update(self) -> Any:
         assert isinstance(self._optim_cfg, ARO_CONFIGS)
-        assert isinstance(self._optim_cfg.u_processor, SCQRConfig)
+        assert isinstance(self._optim_cfg.u_processor, SCQRConfig | CholQrConfig)
         return SCQRUpdate(self._optim_cfg.u_processor.rotation_jitter)
 
     @apps.service(_PrivateServices.u_processor("polar"))

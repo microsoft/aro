@@ -58,9 +58,9 @@ def _global_rank(mesh: DeviceMesh) -> int:
 
 # helpers for uneven splits and padding.
 def _rowsplit_sizes(dim: int, ws: int) -> list[int]:
-    """Return per-rank row counts for sharding dim across ws ranks."""
-    q, r = divmod(dim, ws)
-    return [q + (1 if i < r else 0) for i in range(ws)]  # first r ranks get +1
+    """Return DTensor Shard(0) row counts, including empty trailing shards."""
+    chunk_size = (dim + ws - 1) // ws
+    return [max(0, min(chunk_size, dim - rank * chunk_size)) for rank in range(ws)]
 
 
 def _pad_rows(x: Tensor, target_rows: int) -> Tensor:
@@ -95,7 +95,7 @@ def _build_u_identity(p: Tensor, owner: bool) -> Tensor | None:
 
     if isinstance(p, DTensor):
         mesh = _mesh_of(p)
-        rloc = _global_rank(mesh)
+        rloc = mesh.get_local_rank()
         ws = _world_size(mesh)
         sizes = _rowsplit_sizes(rs, ws)
         rows_local = sizes[rloc]
@@ -113,7 +113,8 @@ def _build_u_identity(p: Tensor, owner: bool) -> Tensor | None:
             placements=(Shard(0),),
             shape=(rs, rs),
             stride=(rs, 1),
-            run_check=True,
+            # The canonical slice is constructed locally; avoid WORLD metadata collectives.
+            run_check=False,
         )
     elif owner:
         return torch.eye(rs, dtype=p.dtype, device=p.device)
@@ -132,9 +133,15 @@ class _ChunkSlot:
     u_full: Tensor | None = None
     b_full: dict[str, Tensor] = field(default_factory=dict)  # base processor states
 
-    # DDP async broadcast handles + optional step buffer, this is not used at the moment. Will fix later.
+    # Scalar base state must follow the owner along with the sharded tensor states.
     bcast_works: list[Any] = field(default_factory=list)
     step_buf: torch.Tensor | None = None
+
+    def record_stream(self, stream: torch.cuda.Stream) -> None:
+        """Keep buffers alive until their consumer stream has finished using them."""
+        for value in chain((self.g_full, self.u_full), self.b_full.values()):
+            if isinstance(value, Tensor) and value.is_cuda:
+                value.record_stream(stream)
 
 
 #  main optimizer
@@ -197,6 +204,7 @@ class AroBase(Optimizer):
         r_global = _global_rank(mesh) if dist.is_initialized() else 0
         ws = _world_size(mesh) if dist.is_initialized() else 1
         assert mesh is None or len(mesh.shape) == 1, f"Expect 1D mesh; got {mesh}"
+        owner_ranks = dist.get_process_group_ranks(mesh.get_group()) if mesh is not None else [0]
 
         for pg in self.param_groups:
             for idx, p in enumerate(pg["params"]):
@@ -207,7 +215,7 @@ class AroBase(Optimizer):
                 if st["base"] is None:
                     st["base"] = self._base_processor.init_state_dict(ref)
                 if st["u"] is None:
-                    st["u"] = _build_u_identity(p, owner=idx % ws == r_global)
+                    st["u"] = _build_u_identity(p, owner=owner_ranks[idx % ws] == r_global)
 
     # state helpers
     def _ensure_ema(self, p: Tensor) -> AdamProcessor:
@@ -255,6 +263,7 @@ class AroBase(Optimizer):
 
                 st["step"] += 1
                 st["u"] = u.view_as(st["u"]).type_as(st["u"])
+                p.grad = grad
                 p.add_(grad, alpha=-(lr * alpha))
                 if wd != 0.0:
                     p.add_(p, alpha=-(lr * wd))
@@ -271,6 +280,8 @@ class AroBase(Optimizer):
         r_global = _global_rank(mesh) if dist.is_initialized() else 0
         ws = _world_size(mesh) if dist.is_initialized() else 1
         assert mesh is None or len(mesh.shape) == 1, f"Expect 1D mesh; got {mesh}"
+        group = mesh.get_group() if mesh is not None else None
+        owner_ranks = dist.get_process_group_ranks(group) if group is not None else [0]
 
         comm_stream = self._comm_stream
         comp_stream = self._comp_stream
@@ -304,7 +315,7 @@ class AroBase(Optimizer):
                 # this should not increase the memory, since we process the shard p.
                 ema_st = self._ensure_ema(p)  # ema's state dict
                 self._ensure_base(p)  # initialize base processor's state dict
-                self._ensure_u(p, owner=j % ws == r_global)  # initialize U if needed
+                self._ensure_u(p, owner=owner_ranks[j % ws] == r_global)  # initialize U if needed
                 # inplace on p.grad local shard
                 p.grad = self._ema_processor.process_grad(p.grad, state_dict=ema_st)
 
@@ -320,7 +331,7 @@ class AroBase(Optimizer):
                 # (2) enqueue gather for the chunk on the comm stream
                 with torch.cuda.stream(comm_stream):
                     for j, p in enumerate(plist[s:e]):
-                        dest = (s + j) % ws
+                        dest = owner_ranks[(s + j) % ws]
                         st = self.state[p]
                         g_dt: Tensor = p.grad
                         u_dt: Tensor | None = st["u"]
@@ -363,11 +374,17 @@ class AroBase(Optimizer):
                                     b_local_pad[bk] = v_pad_local
                                     b_recv[bk] = [torch.empty_like(v_pad_local) for _ in range(ws)]
 
-                            gather(g_pad, g_recv, dst=dest, async_op=False)
-                            gather(u_pad, u_recv, dst=dest, async_op=False)
+                            gather(g_pad, g_recv, dst=dest, group=group, async_op=False)
+                            gather(u_pad, u_recv, dst=dest, group=group, async_op=False)
                             for bk, bv in b_st.items():
                                 if isinstance(bv, DTensor):
-                                    gather(b_local_pad[bk], b_recv[bk], dst=dest, async_op=False)
+                                    gather(
+                                        b_local_pad[bk],
+                                        b_recv[bk],
+                                        dst=dest,
+                                        group=group,
+                                        async_op=False,
+                                    )
 
                             # slice back to true sizes and concatenate
                             g_parts = [t[: rowsP_all[i]] for i, t in enumerate(g_recv)]
@@ -401,14 +418,16 @@ class AroBase(Optimizer):
                             g_pad = _pad_rows(g_local, max_rowsP)
                             u_pad = _pad_rows(u_local, max_rowsU)
 
-                            gather(g_pad, None, dst=dest, async_op=False)
-                            gather(u_pad, None, dst=dest, async_op=False)
+                            gather(g_pad, None, dst=dest, group=group, async_op=False)
+                            gather(u_pad, None, dst=dest, group=group, async_op=False)
                             for bv in b_st.values():
                                 if isinstance(bv, DTensor):
                                     b_rows_all = _rowsplit_sizes(bv.shape[0], ws)
                                     b_max_rows = max(b_rows_all)
                                     v_pad_local = _pad_rows(bv.to_local(), b_max_rows)
-                                    gather(v_pad_local, None, dst=dest, async_op=False)
+                                    gather(
+                                        v_pad_local, None, dst=dest, group=group, async_op=False
+                                    )
 
                             slots[j].gathered = None  # not used on non-owner
 
@@ -423,13 +442,14 @@ class AroBase(Optimizer):
                 # (3) owner computation
                 with torch.cuda.stream(comp_stream):
                     for j, p in enumerate(plist[s:e]):
-                        dest = (s + j) % ws
+                        dest = owner_ranks[(s + j) % ws]
                         st = self.state[p]
                         if dest != r_global:
                             continue  # only owner computes
 
                         # wait gather stream
                         comp_stream.wait_event(slots[j].gathered)
+                        slots[j].record_stream(comp_stream)
 
                         # retrieve from per-param slot
                         g_full = slots[j].g_full
@@ -464,11 +484,14 @@ class AroBase(Optimizer):
                 # (4) scatter back the updates
                 with torch.cuda.stream(comm_stream):
                     for j, p in enumerate(plist[s:e]):
-                        dest = (s + j) % ws
+                        dest = owner_ranks[(s + j) % ws]
                         st = self.state[p]
                         g_dt: Tensor = p.grad if p.grad is not None else torch.zeros_like(p)
                         u_dt: Tensor | None = st["u"]
                         b_st: dict[str, Any] = st["base"]
+
+                        if dest == r_global:
+                            slots[j].record_stream(comm_stream)
 
                         if isinstance(g_dt, DTensor) and isinstance(u_dt, DTensor):
                             # compute sizes for uneven split
@@ -513,7 +536,9 @@ class AroBase(Optimizer):
                                 device=g_dt.to_local().device,
                                 dtype=g_dt.to_local().dtype,
                             )
-                            scatter(g_recv_tmp, g_chunks_pad, src=dest, async_op=False)
+                            scatter(
+                                g_recv_tmp, g_chunks_pad, src=dest, group=group, async_op=False
+                            )
                             if rowsP_local > 0:
                                 g_dt.to_local().copy_(g_recv_tmp[:rowsP_local])
 
@@ -522,7 +547,9 @@ class AroBase(Optimizer):
                                 device=u_dt.to_local().device,
                                 dtype=u_dt.to_local().dtype,
                             )
-                            scatter(u_recv_tmp, u_chunks_pad, src=dest, async_op=False)
+                            scatter(
+                                u_recv_tmp, u_chunks_pad, src=dest, group=group, async_op=False
+                            )
                             if rowsU_local > 0:
                                 u_dt.to_local().copy_(u_recv_tmp[:rowsU_local])
 
@@ -535,7 +562,13 @@ class AroBase(Optimizer):
                                         device=v.to_local().device,
                                         dtype=v.to_local().dtype,
                                     )
-                                    scatter(recv_tmp, b_chunks_pad[k2], src=dest, async_op=False)
+                                    scatter(
+                                        recv_tmp,
+                                        b_chunks_pad[k2],
+                                        src=dest,
+                                        group=group,
+                                        async_op=False,
+                                    )
                                     local_rows = v.to_local().shape[0]
                                     if local_rows > 0:
                                         v.to_local().copy_(recv_tmp[:local_rows])
@@ -549,7 +582,7 @@ class AroBase(Optimizer):
                                 device=g_dt.to_local().device,
                                 dtype=g_dt.to_local().dtype,
                             )
-                            scatter(g_recv_tmp, None, src=dest, async_op=False)
+                            scatter(g_recv_tmp, None, src=dest, group=group, async_op=False)
                             rowsP_local = g_dt.to_local().shape[0]
                             if rowsP_local > 0:
                                 g_dt.to_local().copy_(g_recv_tmp[:rowsP_local])
@@ -559,7 +592,7 @@ class AroBase(Optimizer):
                                 device=u_dt.to_local().device,
                                 dtype=u_dt.to_local().dtype,
                             )
-                            scatter(u_recv_tmp, None, src=dest, async_op=False)
+                            scatter(u_recv_tmp, None, src=dest, group=group, async_op=False)
                             rowsU_local = u_dt.to_local().shape[0]
                             if rowsU_local > 0:
                                 u_dt.to_local().copy_(u_recv_tmp[:rowsU_local])
@@ -573,7 +606,7 @@ class AroBase(Optimizer):
                                         device=v.to_local().device,
                                         dtype=v.to_local().dtype,
                                     )
-                                    scatter(recv_tmp, None, src=dest, async_op=False)
+                                    scatter(recv_tmp, None, src=dest, group=group, async_op=False)
                                     local_rows = v.to_local().shape[0]
                                     if local_rows > 0:
                                         v.to_local().copy_(recv_tmp[:local_rows])
@@ -583,13 +616,23 @@ class AroBase(Optimizer):
                             g_full = slots[j].g_full
                             assert g_full is not None
                             g_chunks = [g_full for _ in range(ws)]
-                            scatter(g_dt, g_chunks, src=dest, async_op=False)
+                            scatter(g_dt, g_chunks, src=dest, group=group, async_op=False)
                         elif dest != r_global and dist.is_initialized():  # ddp and not owner
-                            scatter(g_dt, None, src=dest, async_op=False)
+                            scatter(g_dt, None, src=dest, group=group, async_op=False)
                         elif not dist.is_initialized():  # single-process / owner
                             # no scatter, but keep dependency comp_stream -> comm_stream
                             comm_stream.wait_event(slots[j].rotated)
                             p.grad.copy_(slots[j].g_full)
+
+                        if isinstance(g_dt, DTensor) and "step" in b_st:
+                            slots[j].step_buf = torch.tensor(
+                                b_st["step"], dtype=torch.int64, device=p.device
+                            )
+                            work = dist.broadcast(
+                                slots[j].step_buf, src=dest, group=group, async_op=True
+                            )
+                            assert work is not None
+                            slots[j].bcast_works.append(work)
 
                         # set flag for scatter event
                         slots[j].scattered = torch.cuda.Event()

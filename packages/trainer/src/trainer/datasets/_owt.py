@@ -27,9 +27,14 @@ def get_batch(
     data_dir: Path,
     batch_size: int,
     sequence_len: int,
+    device: DeviceLikeType | torch.Generator | None = None,
     generator: torch.Generator | None = None,
 ) -> tuple[Tensor, Tensor]:
-    """Load a batch of data."""
+    """Load a CPU batch, accepting a legacy device argument or positional generator."""
+    if isinstance(device, torch.Generator):
+        if generator is not None:
+            raise TypeError("Pass the generator either positionally or by keyword, not both")
+        generator = device
     data_file = "train.bin" if split == "train" else "val.bin"
     data = np.memmap(data_dir / data_file, dtype=np.uint16, mode="r")
     ix = torch.randint(len(data) - sequence_len, (batch_size,), generator=generator)
@@ -59,7 +64,7 @@ class TrainOpenWebText(IterableDataset[tuple[Tensor, Tensor]]):
     def __iter__(self) -> Iterator[tuple[Tensor, Tensor]]:
         path, max_length, batch_size = self._path, self._max_length, self._batch_size
         gen = generator_from("train", self._seed, self._worker_id, device="cpu")
-        return iter(lambda: get_batch("train", path, batch_size, max_length, gen), None)
+        return iter(lambda: get_batch("train", path, batch_size, max_length, generator=gen), None)
 
 
 class EvalOpenWebText(torch.utils.data.Dataset[tuple[Tensor, Tensor]]):
@@ -76,4 +81,4 @@ class EvalOpenWebText(torch.utils.data.Dataset[tuple[Tensor, Tensor]]):
     def __getitem__(self, index: int) -> tuple[Tensor, Tensor]:
         generator = generator_from("validation", index, device="cpu")
         path, batch_size, max_length = self._path, self._batch_size, self._max_length
-        return get_batch("val", path, batch_size, max_length, generator)
+        return get_batch("val", path, batch_size, max_length, generator=generator)

@@ -1,6 +1,7 @@
 from ._aro import AroAdamConfig, AroSignConfig, AroSinkhornConfig, MuonConfig
 from ._base import AdamWConfig
-from ._u import U_PROCESSOR, PolarConfig, SCQRConfig
+from ._sinkgd import SinkGDConfig
+from ._u import U_PROCESSOR, CholQrConfig, PolarConfig, SCQRConfig
 
 __all__ = [
     "U_PROCESSOR",
@@ -8,7 +9,9 @@ __all__ = [
     "AroAdamConfig",
     "AroSignConfig",
     "AroSinkhornConfig",
+    "CholQrConfig",
     "MuonConfig",
     "PolarConfig",
     "SCQRConfig",
+    "SinkGDConfig",
 ]
