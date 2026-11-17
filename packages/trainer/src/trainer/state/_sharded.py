@@ -31,6 +31,10 @@ class ShardedState(TrainingState):
     optimizers: Iterable[Optimizer]
     schedulers: Iterable[LRScheduler]
 
+    def __post_init__(self) -> None:
+        # State initialization and DCP serialization both iterate over this collection.
+        self.optimizers = tuple(self.optimizers)
+
     def _initialize_optimizer_states(self) -> None:
         for optimizer in self.optimizers:
             initialize = getattr(optimizer, "ensure_state_initialized", None)

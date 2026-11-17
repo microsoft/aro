@@ -1,0 +1,56 @@
+# Small SinkGD example: NanoGPT on OpenWebText with FSDP2. Launch from the repository root, e.g.:
+#   uv run --no-sync torchrun --standalone --nproc_per_node=4 -m trainer.pretrain --cfg sinkgd
+defaults:
+  # sinkgd | mixed-sinkgd (or any other config/optimizer/<name>.yaml); switch with `optimizer=<name>`
+  - optimizer: sinkgd
+  - _self_
+
+project:
+  name: SinkGD-${model.name}-pretrain
+
+compute_env:
+  nodes: 1
+  accelerator: cuda
+  output_dir: outputs/sinkgd
+
+model:
+  name: nanogpt
+  n_layer: 12
+  n_head: 12
+  n_embd: 768
+  vocab_size: 50304
+  sequence_len: 1024
+  bias: false
+  dropout: 0.0
+
+training:
+  batch_size: 2 # micro-batch size per GPU
+  max_iters: 1000
+  # Global micro-steps per optimizer step, split across GPUs (must be divisible by the GPU count).
+  gradient_accumulation_steps: 24
+  grad_clip: 1.0
+  precision: bfloat16
+  strategy: fsdp2 # none (single GPU) | ddp | fsdp2
+  compile_model: false
+  log_interval: 10
+  eval_interval: 100
+  checkpoint_interval: 0 # 0 disables checkpoint saving
+  checkpoint_path: null # null: <compute_env.output_dir>/checkpoints/<optimizer name>-<config hash>
+
+lr_scheduler:
+  name: linear-cosine
+  warmup_iters: 100
+  min_lr: 0.0001
+  lr_decay_iters: ${training.max_iters}
+
+logger: null # W&B disabled; see nanogpt.yaml for the logger fields
+
+data:
+  name: owt
+  eval_size: 24 # validation batches per evaluation (split across GPUs)
+  path: data/openwebtext
+  num_workers: 0
+  prefetch_factor: null
+  pin_memory: true
+
+seed: 1337

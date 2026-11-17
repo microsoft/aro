@@ -1,10 +1,13 @@
 from abc import ABC
 from typing import Literal
 
+from pydantic import ConfigDict
 from pydantic.dataclasses import dataclass
 
 
-@dataclass(frozen=True)
+# Unknown fields are rejected (and inherited by every optimizer config) so that switching
+# `optimizer.name` across optimizer families cannot silently keep another optimizer's settings.
+@dataclass(frozen=True, config=ConfigDict(extra="forbid"))
 class BaseOptimizerConfig(ABC):
     name: str
     lr: float = 1e-3

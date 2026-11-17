@@ -3,32 +3,43 @@
 ## Build & Run
 
 ```bash
-# Install dependencies (requires uv)
+# Install dependencies (requires uv). The trainer/gpt packages depend on flash-attn; its build
+# downloads a matching prebuilt wheel when one exists and otherwise compiles from source (needs
+# the CUDA toolkit/nvcc and can take a long time). No prebuilt wheel exists for the locked
+# torch/CUDA versions, so this compiles flash-attn.
 uv sync
+# flash-attn is not imported at runtime (the models load FA3 via `kernels` or fall back to SDPA),
+# so it can be skipped; then use `uv run --no-sync` so uv does not try to install it again.
+uv sync --no-install-package flash-attn
 
 # Lint
-uv run ruff check --fix
-uv run ruff format
+uv run --no-sync ruff check --fix
+uv run --no-sync ruff format
 
 # Type check
-uv run pyright
+uv run --no-sync pyright
 
-# Run pretrain training example (single GPU)
-uv run torchrun --standalone --nproc_per_node=1 -m trainer.pretrain --cfg default
+# Tests
+uv run --no-sync pytest
 
-# Training config overrides use Hydra syntax
-uv run torchrun --standalone --nproc_per_node=1 -m trainer.pretrain --cfg default -- optimizer.lr=0.001
+# Run pretrain training example (single GPU, W&B disabled); run from the repository root
+uv run --no-sync torchrun --standalone --nproc_per_node=1 -m trainer.pretrain --cfg nanogpt -- \
+  training.strategy=none logger=null
+
+# Training config overrides use Hydra syntax; select optimizer recipes with `optimizer=<name>`
+uv run --no-sync torchrun --standalone --nproc_per_node=1 -m trainer.pretrain --cfg nanogpt -- \
+  training.strategy=none logger=null optimizer=muon optimizer.lr=0.001
 ```
 
 ## Architecture
 
 ARO is a PyTorch optimizer library for LLM training. It is structured as a **uv workspace monorepo**:
 
-- **`src/aro/`** — The core library (published as the `aro` package). Contains optimizer implementations in `optim/` and `processors/`. Only depends on `torch`.
+- **`src/aro/`** — The core library (published as the `aro` package). Contains optimizer implementations in `optim/` and `processors/`, and RoM low-rank adaptation in `lora/`. Only depends on `torch`.
 - **`packages/gpt/`** — Model definitions (NanoGPT, NanoChat) used for training experiments and dataset preparation utilities (e.g., `python -m dataprep.openwebtext`).
-- **`packages/trainer/`** — Pretrain training loop (`trainer.pretrain`). Uses Hydra for config loading with pydantic validation. Depends on `aro` and `gpt` as workspace references. Supports both non-distributed and DDP strategies specified in config.
-- **`config/`** — Hydra YAML config files for training runs.
-- **`test/`** — Tests for the core `aro` library (not for workspace packages).
+- **`packages/trainer/`** — Pretrain training loop (`trainer.pretrain`). Uses Hydra for config loading with pydantic validation. Depends on `aro` and `gpt` as workspace references. Supports non-distributed (`none`), DDP and FSDP2 strategies specified in config.
+- **`config/`** — Hydra YAML config files for training runs (`nanogpt`, `nanochat`, `sinkgd`), plus the `optimizer/` config group with one recipe per optimizer name.
+- **`test/`** — Tests for the core library (`test_aro/`, `test_lora/`) and the workspace packages (`test_gpt/`, `test_trainer/`).
 
 ### Optimizer pattern
 
@@ -156,18 +167,18 @@ TrainContainer(
 | Container | Responsibility |
 |---|---|
 | `ConfigContainer` | Hydra/OmegaConf config loading, wandb init |
-| `ModelContainer` | Model creation (NanoGPT/NanoChatGPT), DDP wrapping |
+| `ModelContainer` | Model creation (NanoGPT/NanoChatGPT), DDP/FSDP2 wrapping |
 | `InfoModelContainer` | Parameter count, FLOPs estimation (embedded in `ModelContainer`) |
-| `OptimContainer` | Optimizer selection (AdamW, Muon, ARO variants) |
+| `OptimContainer` | Optimizer selection (AdamW, Muon, SinkGD, ARO variants) |
 | `SchedulersContainer` | LR schedulers (embedded in `OptimContainer`) |
-| `StateContainer` | Training state management, checkpoint resume |
+| `StateContainer` | Training state and the per-run checkpoint directory (resumed by `TrainContainer`) |
 | `TrainIteratorContainer` | Training dataset + infinite sampler |
 | `ValDataloaderContainer` | Validation dataset + distributed sampler |
 | `TrainContainer` | Training loop orchestration |
 
 ### Configuration pattern
 
-Optimizer and model configs are **frozen pydantic dataclasses** with a `name` literal discriminator field. Unions use `Annotated[... , Discriminator("name")]` for polymorphic deserialization from Hydra YAML.
+Optimizer and model configs are **frozen pydantic dataclasses** with a `name` literal discriminator field. Unions use `Annotated[... , Discriminator("name")]` for polymorphic deserialization from Hydra YAML. Optimizer configs reject unknown fields (`extra="forbid"`), and each optimizer name has a recipe in `config/optimizer/<name>.yaml` that runs select with `optimizer=<name>`; keep YAML configs listing every field users may override, since Hydra rejects plain `key=value` overrides of keys missing from the YAML.
 
 ## Conventions
 

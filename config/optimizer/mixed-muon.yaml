@@ -1,0 +1,6 @@
+# Same as muon, but the token embedding and LM head are trained with AdamW.
+defaults:
+  - muon
+  - _self_
+
+name: mixed-muon

@@ -17,7 +17,7 @@ class AroAdam(AroBase):
     Args:
         params: Model parameters
         lr: Learning rate. Defaults to 1e-3.
-        betas: Coefficients for Adam momentum. Defaults to (0.9, 0.999).
+        betas: Adam coefficients applied in the rotated basis. Defaults to (0.0, 0.99).
         eps: Small constant for numerical stability. Defaults to 1e-8.
         correct_bias: Apply bias correction in Adam. Defaults to True.
         alpha: Hyperparameter scaling factor. Defaults to 1.0.

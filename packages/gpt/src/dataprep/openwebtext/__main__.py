@@ -15,6 +15,10 @@ from tqdm import tqdm
 DATA_PATH = Path("data") / "openwebtext"
 DATA_PATH.mkdir(parents=True, exist_ok=True)
 
+# Parquet copy of OpenWebText on the Hugging Face Hub (the legacy "openwebtext" alias and its
+# loading script are no longer supported by recent `datasets`/`huggingface_hub` releases).
+DATASET_ID = "Skylion007/openwebtext"
+
 # number of workers in .map() call
 # good number to use is ~order number of cpu cores // 2
 num_proc = 8
@@ -30,8 +34,9 @@ if __name__ == "__main__":
     # Get subset fraction from environment variable or use default
     subset_fraction = float(os.environ.get("SUBSET_FRACTION", "0.29"))
 
-    # takes 54GB in huggingface .cache dir, about 8M documents (8,013,769)
-    dataset = load_dataset("openwebtext", num_proc=num_proc_load_dataset, trust_remote_code=True)
+    # downloads ~24GB of parquet files (about 8M documents, 8,013,769) into the Hugging Face
+    # cache; the full dataset is downloaded even when only a subset is tokenized below
+    dataset = load_dataset(DATASET_ID, num_proc=num_proc_load_dataset)
 
     if subset_fraction < 1.0:
         print(f"Using subset fraction: {subset_fraction:.3f}")
@@ -96,7 +101,7 @@ if __name__ == "__main__":
         filename = DATA_PATH / f"{split}.bin"
         dtype = np.uint16  # (can do since enc.max_token_value == 50256 is < 2**16)
         arr = np.memmap(filename, dtype=dtype, mode="w+", shape=(arr_len,))
-        total_batches = 1024
+        total_batches = min(1024, len(dset))  # small subsets have fewer documents than shards
 
         idx = 0
         for batch_idx in tqdm(range(total_batches), desc=f"writing {filename}"):

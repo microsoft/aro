@@ -1,0 +1,6 @@
+# Same as arosign, but the token embedding and LM head are trained with AdamW.
+defaults:
+  - arosign
+  - _self_
+
+name: mixed-arosign

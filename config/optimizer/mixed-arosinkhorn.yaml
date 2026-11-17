@@ -1,0 +1,7 @@
+# Same as arosinkhorn, but the token embedding and LM head are trained with AdamW.
+# This is the default recipe of the bundled NanoGPT/NanoChat examples.
+defaults:
+  - arosinkhorn
+  - _self_
+
+name: mixed-arosinkhorn

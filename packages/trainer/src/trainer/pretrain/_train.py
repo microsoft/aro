@@ -1,6 +1,8 @@
+import json
 import logging
 import os
 from contextlib import nullcontext
+from dataclasses import asdict
 from typing import Any
 
 import torch
@@ -13,7 +15,7 @@ from wandb.wandb_run import Run
 from trainer.config import BaseConfig
 from trainer.datasets import DatasetServices, TrainIteratorContainer, ValDataloaderContainer
 from trainer.models import ModelContainer, ModelServices
-from trainer.state import StateContainer, StateServices
+from trainer.state import StateContainer, StateServices, latest_checkpoint, mark_latest
 from trainer.utils.device import distributed_grad_sync, get_peak_flops, to_device
 from trainer.utils.randomness import rng_state_from
 from trainer.utils.timer import Timer
@@ -86,9 +88,12 @@ class TrainContainer(apps.Container):
         dtype = {"bfloat16": torch.bfloat16, "float16": torch.float16}[precision]
         output_dir = self._config.compute_env.output_dir
         output_dir.mkdir(parents=True, exist_ok=True)
-        ckpt_enabled = ckpt_interval > 0 and (world_size == 1 or rank == 0 or use_fsdp)
-        ckpt_path = self._config.training.checkpoint_path
-        ckpt_path.mkdir(parents=True, exist_ok=True)
+        ckpt_enabled = ckpt_interval > 0  # all ranks write their part of each checkpoint
+        ckpt_dir = self._state_container.get(StateServices.CHECKPOINT_DIR)
+        if ckpt_enabled and rank == 0:
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
+            config_json = json.dumps(asdict(self._config), indent=2, default=str)
+            (ckpt_dir / "config.json").write_text(config_json)
 
         # modify gradient accumulation depending on world_size
         assert self._config.training.gradient_accumulation_steps % world_size == 0
@@ -120,6 +125,7 @@ class TrainContainer(apps.Container):
         log_on_main_worker(f"GPUs: {world_size}")
         log_on_main_worker(f"FLOPs per token: {flops_per_token / 1e9:.2f}G")
         log_on_main_worker(f"Tokens per iteration: {tokens_bs:,}")
+        log_on_main_worker(f"Checkpoint directory: {ckpt_dir}")
 
         # Initialize training state
         timer = Timer()
@@ -130,8 +136,14 @@ class TrainContainer(apps.Container):
 
         with rng_state_from("init_model", self._config.seed, devices=range(world_size)):  # synced
             state = self._state_container.get(StateServices.TRAINING_STATE)
+        # Resume outside the forked RNG context so the restored RNG state is kept.
+        latest = latest_checkpoint(ckpt_dir)
+        if latest is not None:
+            state.resume_from_checkpoint_if_exists(latest)
+        resumed_step = state.step
         model, optimizers, schedulers = state.model, list(state.optimizers), list(state.schedulers)
         scaler = GradScaler(accelerator, enabled=precision == "float16")
+        # The train iterator skips the batches consumed before `state.step`.
         train_iterator = self._train_container.get(DatasetServices.TRAIN_ITERATOR)
         val_dataloader = self._val_container.get(DatasetServices.VAL_DATALOADER)
 
@@ -155,11 +167,12 @@ class TrainContainer(apps.Container):
 
                 model.train()
 
-            # Checkpoint saving
+            # Checkpoint saving (not at the step we just resumed from)
             val_loss = self._val_losses.compute()
-            if ckpt_enabled and state.step > 0 and state.step % ckpt_interval == 0:
-                fname = f"ckpt-{state.step:09d}-val_{val_loss:.4f}-bestval_{best_val_loss:.4f}.pt"
-                state.save_checkpoint(ckpt_path / fname)
+            if ckpt_enabled and state.step > resumed_step and state.step % ckpt_interval == 0:
+                checkpoint = ckpt_dir / f"ckpt-{state.step:09d}"
+                state.save_checkpoint(checkpoint)
+                mark_latest(ckpt_dir, checkpoint)
 
             # Forward/backward pass
             with timer("fwdbwd_acc", sync=True):

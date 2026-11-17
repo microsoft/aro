@@ -1,0 +1,18 @@
+# SinkGD on every trainable 2D matrix (including the token embedding and LM head); remaining
+# parameters use AdamW configured by the adamw_* fields (which share `lr` with SinkGD).
+name: sinkgd
+lr: 1e-3
+weight_decay: 0.0 # SinkGD only; the AdamW fallback uses adamw_weight_decay
+momentum: 0.95
+nesterov: true
+normalization: alternating # alternating | simultaneous
+sinkhorn_steps: 11 # alternating: odd number of row/column passes; simultaneous: joint passes
+final_row_pass: false # simultaneous only
+start_axis: row # row | col (alternating only)
+eps: 1e-20
+row_filter_threshold: 1e-3
+alpha: 0.2
+constant_norm: true
+adamw_betas: [0.9, 0.95]
+adamw_eps: 1e-8
+adamw_weight_decay: 0.1
