@@ -1,0 +1,15 @@
+# ARO-Sinkhorn on every trainable 2D matrix (including the token embedding and LM head);
+# 1D parameters (biases, norms) use AdamW with betas (0.9, 0.95) and the same lr/weight_decay/eps.
+name: arosinkhorn
+lr: 6e-4
+weight_decay: 0.1
+alpha: 0.2 # update scale; the step is lr * alpha * update (update RMS ~1 with constant_norm)
+momentum: 0.95
+eps: 1e-8
+constant_norm: true # normalize each update to ~unit RMS (aligns update RMS with AdamW)
+update_freq: 1 # refresh the rotation every `update_freq` steps
+sinkhorn_steps: 5
+u_processor:
+  name: scqr # scqr | chol-qr (alias of scqr) | polar
+  rotation_jitter: 1e-9 # scqr/chol-qr only; try 1e-7 if QR fallbacks are frequent
+  steps: 5 # polar only

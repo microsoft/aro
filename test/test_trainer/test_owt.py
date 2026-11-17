@@ -45,3 +45,12 @@ def test_owt_iterators_keep_their_seeded_batch_sequences(tmp_path: Path) -> None
             "val", tmp_path, 3, 8, "cpu", generator_from("validation", index, device="cpu")
         )
         torch.testing.assert_close(validation[index], expected, rtol=0, atol=0)
+
+
+def test_train_iterator_skip_resumes_the_batch_sequence(tmp_path: Path) -> None:
+    np.arange(128, dtype=np.uint16).tofile(tmp_path / "train.bin")
+    full = iter(TrainOpenWebText(tmp_path, batch_size=3, max_length=8, seed=17))
+    expected = [next(full) for _ in range(5)][3:]
+    resumed = iter(TrainOpenWebText(tmp_path, batch_size=3, max_length=8, seed=17, skip_batches=3))
+    for reference in expected:
+        torch.testing.assert_close(next(resumed), reference, rtol=0, atol=0)

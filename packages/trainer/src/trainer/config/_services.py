@@ -9,6 +9,7 @@ import torch.distributed as dist
 import wandb
 from hydra import compose, initialize_config_dir
 from omegaconf import DictKeyType, OmegaConf
+from pydantic import ValidationError
 from wandb.wandb_run import Run
 
 from ._base import BaseConfig
@@ -51,7 +52,16 @@ class ConfigContainer(apps.Container):
     @apps.service(ConfigServices.BASE_CONFIG)
     def _base_config(self) -> BaseConfig:
         dict_config = self.get(ConfigServices.DICT_TYPE_CONFIG)
-        return BaseConfig(**cast(dict[str, Any], dict_config))
+        try:
+            return BaseConfig(**cast(dict[str, Any], dict_config))
+        except ValidationError as error:
+            if any(err["loc"][:1] == ("optimizer",) for err in error.errors()):
+                error.add_note(
+                    "Hint: select an optimizer recipe with `optimizer=<name>` (see "
+                    + "config/optimizer/); `optimizer.name=<name>` only switches between variants "
+                    + "of the same optimizer, e.g. arosinkhorn and mixed-arosinkhorn."
+                )
+            raise
 
     @apps.service(ConfigServices.WANDB_RUN)
     def _wandb_run(self) -> Run | None:

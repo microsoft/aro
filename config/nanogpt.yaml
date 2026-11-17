@@ -1,11 +1,21 @@
+# GPT-2 (124M) pretraining on OpenWebText. Launch from the repository root, e.g.:
+#   uv run --no-sync torchrun --standalone --nproc_per_node=4 -m trainer.pretrain --cfg nanogpt
+# Any field below can be overridden on the command line, e.g. `-- optimizer.lr=1e-3`.
+defaults:
+  # Optimizer recipe from config/optimizer/<name>.yaml; switch with `optimizer=<name>`:
+  # adamw | arosinkhorn | aroadam | arosign | muon | sinkgd
+  # and mixed-arosinkhorn | mixed-aroadam | mixed-arosign | mixed-muon | mixed-sinkgd
+  # (mixed-* train the token embedding and LM head with AdamW).
+  - optimizer: mixed-arosinkhorn
+  - _self_
+
 project:
   name: ARO-${model.name}-oss
 
 compute_env:
-  compute_target: local
-  nproc_per_node: 4
   nodes: 1
   accelerator: cuda
+  output_dir: outputs # checkpoints go to <output_dir>/checkpoints/<run> unless set below
 
 model:
   # GPT-2 124M
@@ -19,34 +29,23 @@ model:
   dropout: 0.0
 
 training:
-  batch_size: 12
+  batch_size: 12 # micro-batch size per GPU
   max_iters: 2600
-  gradient_accumulation_steps: 80 # 5 * 4 GPUs for DDP
+  # Global micro-steps per optimizer step, split across GPUs: each GPU runs
+  # gradient_accumulation_steps / num_gpus micro-steps, so this must be divisible by the
+  # number of GPUs. Tokens per step = batch_size * sequence_len * gradient_accumulation_steps
+  # (~1M here), independent of the GPU count.
+  gradient_accumulation_steps: 80
   grad_clip: 1.0
   precision: bfloat16
-  strategy: ddp
+  strategy: ddp # none (single GPU) | ddp | fsdp2
   log_interval: 10
   eval_interval: 100
   compile_model: true
-
-optimizer:
-  name: mixed-arosinkhorn # mixed-aroadam mixed-arosinkhorn aroadam arosinkhorn adamw
-  lr: 6e-4
-  weight_decay: 0.1
-  alpha: 0.2
-  momentum: 0.95
-  eps: 1e-8
-  constant_norm: true
-  update_freq: 1
-  sinkhorn_steps: 5 # for arosinkhorn
-  betas:
-    # for aroadam
-    - 0.0
-    - 0.95
-  u_processor:
-    name: scqr # scqr polar
-    rotation_jitter: 1e-9 # only for scqr; try 1e-7 if QR fallback is very frequent
-    steps: 5 # only for polar
+  checkpoint_interval: 1000 # 0 disables checkpoint saving
+  # null: <compute_env.output_dir>/checkpoints/<optimizer name>-<config hash>, so relaunching
+  # the same command resumes automatically; set a path to resume a run after changing its config.
+  checkpoint_path: null
 
 lr_scheduler:
   name: linear-cosine
@@ -54,14 +53,19 @@ lr_scheduler:
   min_lr: 6e-5
   lr_decay_iters: ${training.max_iters}
 
-logger:
+logger: # Weights & Biases; set to null (`logger=null`) to disable
   project: ${project.name}
-  entity: optim
-  run_name: ${optimizer.name}-${optimizer.lr}_lr-${optimizer.momentum}Mom-${training.batch_size}bs-${training.gradient_accumulation_steps}acc-${model.sequence_len}ctx
+  entity: null # your W&B user or team; null uses your default entity
+  host: null # custom W&B server URL; null uses the default
+  mode: null # online | offline | disabled; null uses the W&B default (online)
+  run_name: ${optimizer.name}-${optimizer.lr}_lr-${training.batch_size}bs-${training.gradient_accumulation_steps}acc-${model.sequence_len}ctx
 
 data:
   name: owt
-  eval_size: 200
-  path: data/openwebtext
+  eval_size: 200 # validation batches per evaluation (split across GPUs)
+  path: data/openwebtext # train.bin/val.bin written by `python -m dataprep.openwebtext`
+  num_workers: 0
+  prefetch_factor: null
+  pin_memory: true
 
 seed: 1337

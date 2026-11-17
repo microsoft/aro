@@ -1,0 +1,6 @@
+# Same as aroadam, but the token embedding and LM head are trained with AdamW.
+defaults:
+  - aroadam
+  - _self_
+
+name: mixed-aroadam

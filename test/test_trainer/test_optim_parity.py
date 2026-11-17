@@ -2,6 +2,7 @@ from dataclasses import replace
 
 import pytest
 import torch
+from pydantic import ValidationError
 
 from aro.optim import AroSign
 from aro.processors.u import CholQrUpdate
@@ -13,6 +14,7 @@ from trainer.config.optim import (
     CholQrConfig,
     PolarConfig,
     SCQRConfig,
+    SinkGDConfig,
 )
 from trainer.models import ModelContainer, ModelServices
 from trainer.optim import OptimContainer, OptimServices
@@ -26,6 +28,29 @@ def test_polar_steps_accept_the_internal_override_syntax() -> None:
     ).get(ConfigServices.BASE_CONFIG)
     assert isinstance(config.optimizer, AroSinkhornConfig)
     assert config.optimizer.u_processor == PolarConfig(steps=2)
+
+
+def test_optimizer_recipe_replaces_the_whole_optimizer_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = ConfigContainer("config", "nanogpt", ["optimizer=sinkgd"]).get(
+        ConfigServices.BASE_CONFIG
+    )
+    assert config.optimizer == SinkGDConfig()
+
+    with pytest.raises(ValidationError, match="sinkhorn_steps"):
+        ConfigContainer("config", "nanogpt", ["optimizer.name=muon"]).get(
+            ConfigServices.BASE_CONFIG
+        )
+
+    monkeypatch.setattr("trainer.models._services.get_device", lambda: torch.device("cpu"))
+    overrides = ["model.n_layer=1", "model.n_head=2", "model.n_embd=8", "model.vocab_size=32"]
+    overrides += ["training.strategy=none", "training.compile_model=false", "optimizer=adamw"]
+    overrides += ["optimizer.betas=[0.8,0.9]", "optimizer.weight_decay=0.2"]
+    config = ConfigContainer("config", "nanogpt", overrides).get(ConfigServices.BASE_CONFIG)
+    (adamw,) = OptimContainer(config, ModelContainer(config)).get(OptimServices.OPTIMIZERS)
+    assert adamw.param_groups[0]["betas"] == (0.8, 0.9)
+    assert adamw.param_groups[0]["weight_decay"] == 0.2
 
 
 @pytest.mark.parametrize("model_name", ["nanogpt", "nanochat"])
@@ -43,7 +68,7 @@ def test_shipped_settings_match_reference_updates_and_decay(
         "training.compile_model=false",
         "training.max_iters=6",
         "lr_scheduler.warmup_iters=1",
-        "optimizer.name=mixed-aroadam",
+        "optimizer=mixed-aroadam",
         "logger=null",
     ]
     if model_name == "nanochat":
@@ -109,7 +134,7 @@ def test_full_arosign_factory_accepts_rotation_names(
             "model.bias=true",
             "training.strategy=none",
             "training.compile_model=false",
-            "optimizer.name=arosign",
+            "optimizer=arosign",
             f"optimizer.u_processor.name={rotation}",
             "~optimizer.u_processor.rotation_jitter",
         ],

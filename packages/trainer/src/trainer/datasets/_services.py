@@ -51,12 +51,17 @@ class TrainIteratorContainer(apps.Container):
     @apps.service(_PrivateServices.dataset("owt"))
     def _train_owt(self) -> Dataset[Any]:
         assert isinstance(self._config.data, OWTConf)
+        # Each optimizer step consumes gradient_accumulation_steps / world_size batches per rank.
+        world_size = int(os.getenv("WORLD_SIZE", "1"))
+        batches_per_step = self._config.training.gradient_accumulation_steps // world_size
+        start_step = self._state_container.get(StateServices.TRAINING_STATE).step
         return TrainOWT(
             path=self._config.data.path,
             batch_size=self._config.training.batch_size,
             max_length=self._config.model.sequence_len,
             seed=self._config.seed,
             worker_id=int(os.getenv("RANK", "0")),
+            skip_batches=start_step * batches_per_step,
         )
 
     @apps.service(DatasetServices.TRAIN_ITERATOR)
@@ -73,13 +78,7 @@ class TrainIteratorContainer(apps.Container):
             prefetch_factor=prefetch_factor,
             pin_memory=data_cfg.pin_memory and torch.cuda.is_available(),
         )
-        i = 0
-        iterable_dl = iter(dl)
-        start_at_step = self._state_container.get(StateServices.TRAINING_STATE).step
-        while i < start_at_step:
-            next(iterable_dl)
-            i += 1
-        return iterable_dl
+        return iter(dl)
 
 
 class ValDataloaderContainer(apps.Container):

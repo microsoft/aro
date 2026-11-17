@@ -1,77 +1,90 @@
 # :sparkles: ARO
 
 [![main](https://github.com/microsoft/aro/actions/workflows/main.yml/badge.svg)](https://github.com/microsoft/aro/actions/workflows/main.yml)
-[![Checked with pyright](https://microsoft.github.io/pyright/img/pyright_badge.svg)](https://microsoft.io/pyright/)
+[![Checked with pyright](https://microsoft.github.io/pyright/img/pyright_badge.svg)](https://microsoft.github.io/pyright/)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## Adaptive Rotation Optimizers
 
-ARO is a library of Pytorch optimizers for LLM training. For more details, see our report:
+ARO is a library of PyTorch optimizers for LLM training. For more details, see our report:
 
 **[ARO: A New Lens On Matrix Optimization For Large Models](https://arxiv.org/abs/2602.09006)**
 
 For low-rank adaptation (LoRA), the library also includes
-[RoM (Rotated Manifold Optimization)](#rom-rotated-manifold-optimization-for-low-rank-adaptation),
+[RoM (Rotated Manifold Optimization)](#f-rom-rotated-manifold-optimization-for-low-rank-adaptation),
 introduced in **[Rotated Manifold Optimization for Low-Rank Adaptation](https://arxiv.org/abs/2609.34264)**.
+
+It also includes [SinkGD (Sinkhorn Gradient Descent)](#e-sinkgd), a rotation-free matrix
+optimizer based on repeated row/column normalization, introduced in
+**[Gradient Multi-Normalization for Stateless and Scalable LLM Training](https://arxiv.org/abs/2502.06742)**
+(implemented here as a momentum-based variant).
 
 It includes a range of advanced optimizers designed to improve training efficiency and model performance.
 These optimizers process and rotate gradients prior to updating model parameters, leveraging
 structures from the model architecture.
 
-ARO includes the following optimizers:
+ARO includes the following optimizers (all in `aro.optim`):
 
 * AroAdam: An adaptive learning rate optimizer that tracks first, second moments of gradients and incorporates gradient rotation.
 * AroSinkhorn: A variant that applies Sinkhorn-style row/column L2 normalization to gradients in a rotated basis and then rotates the update back.
 * AroSign: An optimizer that applies rotation to the sign of the gradients, inspired by signSGD.
-* [SinkGD](#sinkgd): Rotation-free Nesterov momentum with alternating or simultaneous row/column normalization and shard-local FSDP2 updates.
+* Muon: Momentum orthogonalized via Newton–Schulz iterations (Moonlight-style, with update RMS aligned to AdamW), implemented as the rotation-free special case of the ARO framework.
+* [SinkGD](#e-sinkgd): Rotation-free Nesterov momentum with alternating or simultaneous row/column normalization and shard-local FSDP2 updates.
 
 Our default in the paper uses AroSinkhorn, which provides robust overall performance. In certain cases, AroAdam can outperform AroSinkhorn.
 
 -----------------------------------------------------------------
 
-## :rocket: Getting started with ARO
+## :rocket: Quick start
 
-Add `aro` to your project dependencies, e.g., if using `uv`:
+This section gets you running quickly; the [Appendix](#appendix) covers requirements,
+configuration and advanced usage in detail.
+
+### 1. Use ARO in your own training loop
+
+The `aro` library needs Python ≥ 3.12 and PyTorch (its only dependency) and runs on CPU or CUDA.
+Add it to your project, e.g. with `uv` or `pip`:
 
 ```bash
 uv add "aro @ git+https://github.com/microsoft/aro"
+# or: pip install "aro @ git+https://github.com/microsoft/aro"
 ```
 
-## :bulb: Training example
-
-Training with ARO optimizers is not different than training with Adam or other standard optimizers:
-
-1. Load your model and optimizer
+ARO optimizes 2D weight matrices; keep the other parameters on AdamW. The split and
+hyperparameters below mirror our NanoGPT example (the `mixed-arosinkhorn` recipe):
 
 ```python
 import torch
+from torch.optim import AdamW
 
 from aro.optim import AroSinkhorn
-from torch.optim import AdamW
 
 model = ...  # your model, moved to CUDA before constructing the optimizers
 lr = 6e-4
+weight_decay = 0.1
 grad_clip = 1.0
 max_iters = 100000
 loss_fn = torch.nn.CrossEntropyLoss()
 train_iterator = ...  # your data iterator
 
-# ARO accepts 2D parameters only. Keep the head and all other shapes on AdamW.
+# AdamW: output head, token embedding and every non-2D parameter (biases, norms).
+# ARO: all remaining 2D weight matrices. Adapt the module names to your model.
 trainable = [p for p in model.parameters() if p.requires_grad]
-head_ids = {id(p) for p in model.lm_head.parameters()}
-aro_params = [p for p in trainable if p.ndim == 2 and id(p) not in head_ids]
+adamw_modules = [model.lm_head, model.tok_embeddings]
+adamw_ids = {id(p) for module in adamw_modules for p in module.parameters()}
+aro_params = [p for p in trainable if p.ndim == 2 and id(p) not in adamw_ids]
 aro_ids = {id(p) for p in aro_params}
 adamw_params = [p for p in trainable if id(p) not in aro_ids]
 
-optimizers = []
-if adamw_params:
-    optimizers.append(AdamW(adamw_params, lr=lr, betas=(0.9, 0.95)))
-if aro_params:
-    optimizers.append(AroSinkhorn(aro_params, lr=lr))
+optimizers = [
+    AdamW(adamw_params, lr=lr, betas=(0.9, 0.95), weight_decay=weight_decay),
+    AroSinkhorn(aro_params, lr=lr, weight_decay=weight_decay),
+]
 ```
 
-2. Training loop (with clipping and bf16 mixed precision)
+The training loop is the same as with any PyTorch optimizer (shown with gradient clipping and
+bf16 mixed precision):
 
 ```python
 step = 0
@@ -94,59 +107,317 @@ while True:
         break
 ```
 
+The examples also use a learning-rate schedule (200 warmup iterations, then cosine decay to
+`lr / 10`). See [Appendix B](#b-using-the-optimizers-in-your-own-code) for the other optimizers,
+multi-GPU training and checkpointing.
 
-## Running provided examples in this repo
+### 2. Run the bundled NanoGPT example
 
-1. Clone and install the repository:
+The example pretrains GPT-2 (124M) on OpenWebText with the default `mixed-arosinkhorn` recipe.
+You need Linux, NVIDIA GPU(s) with a driver that supports CUDA 13.0,
+[uv](https://docs.astral.sh/uv/getting-started/installation/) and roughly 100 GB of free disk for
+the dataset (see [Appendix A](#a-requirements-and-installation)). Run all commands from the
+repository root.
 
 ```bash
+# 1. Install. This skips the optional flash-attn package; a plain `uv sync` also compiles it from
+#    source, which needs the CUDA 13 toolkit (nvcc), see Appendix A.
 git clone https://github.com/microsoft/aro.git
 cd aro
-uv sync
+uv sync --no-install-package flash-attn
+
+# 2. Download (~24 GB) and tokenize OpenWebText into data/openwebtext/ (see Appendix C)
+uv run --no-sync python -m dataprep.openwebtext
+
+# 3. Log in to Weights & Biases (or add `-- logger=null` to the training command to disable it)
+uv run --no-sync wandb login
+
+# 4. Train on 4 GPUs (~1-1.5 hours on 4x A100 80GB). Runs log to your default W&B entity;
+#    set `logger.entity=<your W&B user or team>` to log elsewhere.
+uv run --no-sync torchrun --standalone --nproc_per_node=4 -m trainer.pretrain --cfg nanogpt
 ```
 
-2. Download the data:
+Common variations (append overrides after `--`, e.g. `... --cfg nanogpt -- optimizer=muon`):
+
+* **Another optimizer:** `optimizer=<name>` with `adamw`, `arosinkhorn`, `aroadam`, `arosign`,
+  `muon`, `sinkgd`, or their `mixed-` variants (see [Appendix D](#optimizer-recipes)).
+* **Single GPU:** use `--nproc_per_node=1` and append `training.strategy=none`. Other GPU counts
+  must divide `training.gradient_accumulation_steps` (80) evenly
+  (see [Appendix D](#gpus-batch-size-and-gradient-accumulation)).
+* **Other examples:** `--cfg nanochat` (NanoChat-style model) or `--cfg sinkgd` (small SinkGD run).
+* **Resuming:** relaunch the same command; training continues from the latest checkpoint
+  (see [Appendix D](#outputs-checkpoints-and-resuming)).
+
+-----------------------------------------------------------------
+
+# :mountain: Contributing
+
+Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details on contributing to this project.
+
+# :triangular_ruler: Conventions
+
+Consider reading [.github/copilot-instructions.md](.github/copilot-instructions.md) for a summary of the repository structure and coding style.
+
+# :balance_scale: Trademarks
+
+This project may contain trademarks or logos for projects, products, or services. Authorized use of Microsoft
+trademarks or logos is subject to and must follow
+[Microsoft's Trademark & Brand Guidelines](https://www.microsoft.com/en-us/legal/intellectualproperty/trademarks/usage/general).
+Use of Microsoft trademarks or logos in modified versions of this project must not cause confusion or imply Microsoft sponsorship.
+Any use of third-party trademarks or logos are subject to those third-party's policies.
+
+
+# :bookmark_tabs: Citation
+
+If you use ARO in your research, please cite:
+
+```bibtex
+@article{gong2026aro,
+  title={ARO: A New Lens On Matrix Optimization For Large Models},
+  author={Gong, Wenbo and Zazo, Javier and Luo, Qijun and Wang, Puqian and Hensman, James and Ma, Chao},
+  journal={arXiv preprint arXiv:2602.09006},
+  year={2026}
+}
+```
+
+If you use RoM for low-rank adaptation, please cite:
+
+```bibtex
+@article{ding2026rom,
+  title={Rotated Manifold Optimization for Low-Rank Adaptation},
+  author={Ding, Yuhui and Zazo, Javier and Hensman, James},
+  journal={arXiv preprint arXiv:2609.34264},
+  year={2026},
+  doi={10.48550/arXiv.2609.34264},
+  url={https://arxiv.org/abs/2609.34264}
+}
+```
+
+For the SinkGD algorithm, please also cite:
+
+```bibtex
+@article{scetbon2025gradient,
+  title={Gradient multi-normalization for stateless and scalable llm training},
+  author={Scetbon, Meyer and Ma, Chao and Gong, Wenbo and Meeds, Edward},
+  journal={arXiv preprint arXiv:2502.06742},
+  year={2025}
+}
+```
+
+-----------------------------------------------------------------
+
+# Appendix
+
+## A. Requirements and installation
+
+**Library (`aro`).** Python ≥ 3.12 and PyTorch, its only dependency (tested with PyTorch 2.14).
+The optimizers run on CPU or CUDA; multi-GPU training uses `torch.distributed` (DDP or FSDP2).
+
+**Bundled examples (`gpt` and `trainer` packages).**
+
+* **OS and GPUs:** Linux with one or more NVIDIA GPUs. The trainer is CUDA-only. The default
+  NanoGPT configuration was tested on 4x A100 80GB, at about 1.5 s per iteration (2600 iterations
+  take about 1-1.5 hours including evaluation). With less GPU memory, lower
+  `training.batch_size` (see [Appendix D](#gpus-batch-size-and-gradient-accumulation)).
+* **NVIDIA driver:** `uv sync` installs PyTorch wheels built for CUDA 13.0 (the `torchcuda` index
+  in `pyproject.toml`), which need a driver that supports CUDA 13.0 (R580 or newer). For another
+  CUDA version, point that index to another CUDA build of PyTorch and run `uv lock`.
+* **uv and Python:** install [uv](https://docs.astral.sh/uv/getting-started/installation/); it
+  downloads a suitable Python (≥ 3.12) automatically if needed.
+* **Disk:** roughly 100 GB of free space for data preparation (see
+  [Appendix C](#c-data-preparation)), plus about 3 GB per training checkpoint.
+* **Network:** data preparation downloads from the Hugging Face Hub. On Hopper or newer GPUs,
+  importing the `gpt` package also downloads Flash Attention 3 kernels from the Hub (used by
+  NanoChat; other GPUs use PyTorch SDPA).
+
+**flash-attn.** The `gpt` and `trainer` packages list `flash-attn` as a dependency, but no code
+imports it at runtime (NanoGPT uses PyTorch SDPA; NanoChat loads Flash Attention 3 through
+`kernels` or falls back to SDPA). `uv sync` installs it from a pinned source revision: its build
+first tries to download a matching prebuilt wheel and compiles from source only when none exists.
+No prebuilt wheel exists for the locked PyTorch 2.14 / CUDA 13 combination, so `uv sync` compiles
+it, which needs the CUDA 13 toolkit (`nvcc`), a lot of RAM and can take a long time (set e.g.
+`MAX_JOBS=4` to limit parallel compile jobs). To skip it:
+
+```bash
+uv sync --no-install-package flash-attn
+```
+
+Then always use `uv run --no-sync ...`, since a plain `uv run` would try to install flash-attn
+again.
+
+## B. Using the optimizers in your own code
+
+**Which parameters.** AroSinkhorn, AroAdam, AroSign and Muon accept only 2D parameters; put
+biases, normalization weights and other shapes on a separate optimizer such as AdamW. The
+examples use two parameter splits:
+
+* **Full** (`arosinkhorn`, `aroadam`, `arosign`, `muon` in the trainer): every trainable 2D
+  matrix, including the token embedding and the output head, uses the matrix optimizer.
+* **Mixed** (`mixed-arosinkhorn`, the default, and the other `mixed-` recipes): the token
+  embedding and the output head use AdamW as well, as in the [Quick start](#1-use-aro-in-your-own-training-loop).
+
+**Constructor defaults.** All arguments are keyword-only:
+
+| Optimizer | Defaults |
+|---|---|
+| `AroSinkhorn` | `lr=1e-3, sinkhorn_steps=5, momentum=0.95, alpha=0.2, weight_decay=0.0, eps=1e-8, update_freq=1, constant_norm=True, u_processor=SCQRUpdate(rotation_jitter=1e-9)` |
+| `AroAdam` | `lr=1e-3, betas=(0.0, 0.99), momentum=0.95, alpha=1.0, weight_decay=0.0, eps=1e-8, correct_bias=True, update_freq=1, constant_norm=True, u_processor=SCQRUpdate(rotation_jitter=1e-9)` |
+| `AroSign` | `lr=1e-3, momentum=0.95, alpha=0.2, weight_decay=0.0, eps=1e-8, update_freq=1, constant_norm=True, u_processor=SCQRUpdate(rotation_jitter=1e-9)` |
+| `Muon` | `lr=1e-3, ns_steps=5, momentum=0.95, alpha=0.2, weight_decay=0.0, eps=1e-8, constant_norm=True` |
+| `SinkGD` | see [Appendix E](#e-sinkgd) |
+
+* `momentum` is applied to the raw gradient before rotation. AroAdam's `betas` drive the Adam
+  moments in the rotated basis.
+* With `constant_norm=True`, each update is normalized to roughly unit RMS (aligning its scale
+  with AdamW), and the parameter step is `lr * alpha * update`. Weight decay is decoupled
+  (`p -= lr * weight_decay * p`).
+* `update_freq` controls how often the rotation is refreshed. `u_processor` (from
+  `aro.processors.u`) selects the rotation update: `SCQRUpdate(rotation_jitter)` (default),
+  `PolarUpdate(steps)`, or `CholQrUpdate` (an alias of `SCQRUpdate`).
+* The examples use `lr=6e-4` (NanoGPT) or `2e-3` (NanoChat), `weight_decay=0.1`, `alpha=0.2`,
+  200 warmup iterations and cosine decay to `lr / 10`. AroAdam's constructor defaults differ
+  from the examples: pass `alpha=0.2, betas=(0.0, 0.95)` to match them. The recipes are listed
+  in [`config/optimizer/`](config/optimizer).
+
+**Multi-GPU training.** On CUDA, ARO optimizers (including Muon) assign matrices to ranks
+round-robin with both DDP and FSDP2: each rank computes rotation updates for its assigned
+matrices and distributes the updates to the other ranks. Every rank must construct the optimizer
+with the same parameters in the same order and call `step()`.
+
+* **DDP:** initialize `torch.distributed` and wrap the model in `DistributedDataParallel`, so
+  gradients are synchronized before `step()`.
+* **FSDP2:** apply `fully_shard` before constructing the optimizer. FSDP2 updates support
+  uneven and empty trailing row shards and one-dimensional submeshes.
+* **CPU:** execution uses local updates.
+
+Both execution paths leave the processed update in each active parameter's `.grad`. Read
+gradients (e.g. for logging) before `step()`, and call `zero_grad()` before accumulating the next
+step.
+
+**Checkpointing.** Use the standard `state_dict()` / `load_state_dict()`, with one caveat for
+DDP: each matrix's rotation state (and AroAdam's second moments) lives only on the rank that owns
+the matrix. Save `optimizer.state_dict()` on every rank (e.g. one file per rank) and load each
+rank's file with the same number of GPUs, as the bundled trainer does. With FSDP2, use
+`torch.distributed.checkpoint` (`get_state_dict` / `set_state_dict`), and call
+`optimizer.ensure_state_initialized()` before loading into a freshly constructed ARO optimizer.
+
+## C. Data preparation
 
 ```bash
 uv run --no-sync python -m dataprep.openwebtext
 ```
 
-3. Run a training example:
+* **Run it from the repository root.** It writes `data/openwebtext/train.bin` and `val.bin`
+  (GPT-2 BPE tokens as `uint16`), the default `data.path` of the trainer configs, which is
+  resolved relative to the working directory.
+* **Download:** the [Skylion007/openwebtext](https://huggingface.co/datasets/Skylion007/openwebtext)
+  parquet files (~24 GB, about 8M documents) go to the Hugging Face cache. Set `HF_HOME` to put
+  the cache on a large disk. The whole dataset is downloaded even when only a subset is
+  tokenized.
+* **Subset:** the `SUBSET_FRACTION` environment variable (default `0.29`) selects the fraction of
+  documents to tokenize. 0.29 gives about 2.6B training tokens, enough for the default 2600
+  iterations of ~1M tokens each; set `SUBSET_FRACTION=1.0` for the full ~9B tokens. 0.05% of the
+  selected documents are held out for validation.
+* **Disk and time:** at the default fraction, plan for about 90 GB of free disk: the ~24 GB
+  download, a ~40 GB Hugging Face Arrow cache, a ~21 GB tokenized cache and the ~5 GB
+  `train.bin`. With `SUBSET_FRACTION=1.0`, plan for about 150 GB (`train.bin` is then about
+  17 GB). Tokenization uses 8 processes. Once the `.bin` files exist, the trainer no longer
+  needs the Hugging Face cache, so you can delete it.
 
-```bash
-uv run --no-sync torchrun --standalone --nproc_per_node=4 -m trainer.pretrain --cfg nanogpt -- <optional-overrides>
-```
+## D. Bundled trainer
 
-Here, `<optional-overrides>` are command-line [hydra overrides](https://hydra.cc/docs/advanced/override_grammar/basic/).
-For example, `optimizer.lr=0.001` to change the learning rate:
-```bash
-uv run --no-sync torchrun --standalone --nproc_per_node=4 -m trainer.pretrain --cfg nanogpt -- optimizer.lr=0.001
-```
+`trainer.pretrain` is an example harness for the optimizers. It trains the NanoGPT (GPT-2 124M)
+and NanoChat-style models from the `gpt` package on the tokenized OpenWebText files, on CUDA
+GPUs only. To use other models or datasets, use the optimizers directly
+([Appendix B](#b-using-the-optimizers-in-your-own-code)) or extend `packages/gpt` and
+`packages/trainer`.
 
-Configuration values are validated with pydantic at runtime.
-Use `logger=null` to disable Weights & Biases, or configure your own logger settings.
+### Configs and overrides
 
-Use `training.strategy=fsdp2` to run with FSDP2 instead of DDP. NanoGPT's tied
-token embedding and language-model head are sharded together in one FSDP group
-to preserve weight sharing.
+Launch with `--cfg <name>` for one of the configs in [`config/`](config): `nanogpt` (default),
+`nanochat` or `sinkgd`. Append [Hydra overrides](https://hydra.cc/docs/advanced/override_grammar/basic/)
+after `--`, e.g. `-- optimizer.lr=0.001 training.max_iters=5000`. Each config lists every field
+you can override, with comments, and pydantic validates the values at startup.
 
-CUDA ARO optimizers use round-robin matrix ownership with both DDP and FSDP2:
-each rank computes rotation updates for its assigned matrices and distributes
-the updates to the other ranks. FSDP2 updates support uneven and empty trailing
-row shards and one-dimensional submeshes. CPU execution uses local updates.
-Both execution paths leave the processed update in each active parameter's
-`.grad`; call `zero_grad()` before accumulating the next step.
+### Optimizer recipes
 
-The NanoGPT example uses learning rate `6e-4`, minimum learning rate `6e-5`, and
-decays over `training.max_iters`. Both model examples use Adam betas `(0.0, 0.95)`
-when selecting AroAdam. These settings supersede the earlier OSS example defaults.
+`optimizer=<name>` selects a complete recipe from [`config/optimizer/`](config/optimizer), and
+`optimizer.<field>=<value>` tweaks it (e.g. `optimizer=aroadam optimizer.alpha=0.1`).
 
-`SCQRUpdate` and `SCQRConfig` use standalone rotation jitter `1e-7`. The ARO
-optimizer constructors and example YAMLs explicitly retain `1e-9`. The legacy
-`CholQrUpdate`, `chol_qr_safe_take_stats`, `CholQrConfig`, and `chol-qr` configuration
-name remain supported alongside the SCQR names.
+| Recipe | Matrix optimizer handles | AdamW handles |
+|---|---|---|
+| `adamw` | – | all trainable parameters |
+| `arosinkhorn`, `aroadam`, `arosign`, `muon` | all trainable 2D matrices, including the token embedding and LM head | 1D parameters |
+| `mixed-arosinkhorn` (default), `mixed-aroadam`, `mixed-arosign`, `mixed-muon` | 2D matrices except the token embedding and LM head | the token embedding, LM head and 1D parameters |
+| `sinkgd`, `mixed-sinkgd` | as above (see [Appendix E](#e-sinkgd)) | as above, with separate `adamw_*` settings |
 
-## SinkGD
+* **AdamW fallback:** for the ARO and Muon recipes it uses betas `(0.9, 0.95)` and the recipe's
+  `lr`, `weight_decay` and `eps`.
+* **Learning rate:** recipes default to `lr=6e-4` (SinkGD: `1e-3`), and `nanochat.yaml`
+  overrides it to `2e-3` for whichever recipe is selected.
+* **Switching optimizers:** use `optimizer=<name>` rather than `optimizer.name=<name>`.
+  `optimizer.name` can only switch between a recipe and its `mixed-` variant; other changes fail
+  validation with a hint.
+
+### GPUs, batch size and gradient accumulation
+
+* **Tokens per iteration:** `batch_size * sequence_len * gradient_accumulation_steps`
+  (12 x 1024 x 80 ≈ 1M by default), independent of the number of GPUs.
+* **Splitting across GPUs:** `training.gradient_accumulation_steps` is global, so each GPU runs
+  `gradient_accumulation_steps / num_gpus` micro-batches of `training.batch_size` sequences per
+  iteration. The GPU count must divide it evenly; the default 80 works with 1, 2, 4, 5, 8, 10 or
+  16 GPUs.
+* **Single GPU:** use `--nproc_per_node=1` and `training.strategy=none`. All 80 micro-batches
+  then run on one GPU, so each iteration takes about 4x longer than on 4 GPUs.
+* **Out of memory:** lower `training.batch_size` and raise `training.gradient_accumulation_steps`
+  by the same factor to keep the tokens per iteration unchanged.
+
+### Strategies
+
+`training.strategy` is `none` (single process), `ddp` (default for `nanogpt`/`nanochat`) or
+`fsdp2` (default for `sinkgd`). With FSDP2, NanoGPT's tied token embedding and language-model head
+are sharded together in one FSDP group to preserve weight sharing. Model compilation
+(`training.compile_model`) takes about a minute at startup.
+
+### Weights & Biases
+
+The `logger` section configures W&B:
+
+* **Logging in:** log in once with `uv run --no-sync wandb login` (or set `WANDB_API_KEY`).
+  Without credentials, startup fails.
+* **Entity:** runs log to your default entity; set `logger.entity=<your W&B user or team>` (in
+  the YAML or on the command line) to change it.
+* **Mode and server:** `logger.mode=offline` logs locally, and `logger.host` points to a custom
+  W&B server.
+* **Disabling:** `logger=null` turns W&B off.
+
+### Outputs, checkpoints and resuming
+
+**Logs.** Rank 0 prints the training loss every `training.log_interval` iterations, together
+with throughput, MFU and the estimated time left. It also prints the validation loss every
+`training.eval_interval` iterations, computed over `data.eval_size` batches. The same metrics go
+to W&B when enabled.
+
+**Checkpoints.** Every `training.checkpoint_interval` iterations (default 1000; 0 disables
+saving), the trainer writes `ckpt-<step>/` into the run's checkpoint directory. It is about 3 GB
+for the default 4-GPU NanoGPT run. With `training.checkpoint_path=null` (the default), the
+directory is `<compute_env.output_dir>/checkpoints/<optimizer>-<hash>/`, where the hash covers
+every setting that affects training (logging, evaluation and checkpoint settings excluded). The
+directory also contains `config.json` and a `latest` file naming the newest complete checkpoint.
+Checkpoints are only written at multiples of the interval, so the default 2600-iteration run
+saves at iterations 1000 and 2000. The trainer keeps all checkpoints.
+
+**Resuming.** Relaunching the same command resumes from `latest`, restoring the model,
+optimizer and scheduler states, the RNG state and the position in the training data. For DDP and
+single-GPU runs, resume with the same number of GPUs.
+
+* **Changing settings:** changing any training setting starts a fresh run in a new directory.
+  To continue a run with different settings (e.g. more iterations), pass its directory
+  explicitly: `training.checkpoint_path=outputs/checkpoints/<optimizer>-<hash>`.
+* **Multi-node:** the checkpoint directory must be on storage shared by all nodes.
+* **W&B:** each launch creates a new W&B run.
+
+## E. SinkGD
 
 SinkGD (Sinkhorn Gradient Descent) is a matrix optimizer based on repeated
 row-wise and column-wise L2 normalization. It balances gradient magnitudes
@@ -168,7 +439,7 @@ repository's NanoGPT/NanoChat trainer. Keep biases, normalization vectors, and
 other parameter shapes on a separate optimizer such as AdamW. Sparse gradients
 are not supported. For RoM's frozen ADB factors, use `FixedRankRGD` instead.
 
-**Quick start.** This self-contained CPU example applies SinkGD to matrices and
+**Example.** This self-contained CPU example applies SinkGD to matrices and
 AdamW to biases. Move the model to CUDA before constructing optimizers if desired,
 and move the batches to the same device.
 
@@ -230,8 +501,9 @@ gradients are not modified. Save and load optimizer state with the standard
 
 **Bundled trainer.** [`config/sinkgd.yaml`](config/sinkgd.yaml) uses NanoGPT,
 context length 1024, FSDP2, and disables model compilation, W&B, and checkpoint
-saving. It expects `data/openwebtext/train.bin` and `val.bin` from the preparation
-helper above.
+saving. It expects `data/openwebtext/train.bin` and `val.bin` from
+[data preparation](#c-data-preparation). Select the parameter split with `optimizer=sinkgd`
+(default) or `optimizer=mixed-sinkgd`:
 
 | Optimizer name | Parameters handled by SinkGD | Parameters handled by AdamW |
 |---|---|---|
@@ -246,35 +518,14 @@ and `adamw_weight_decay=0.1`, sharing `optimizer.lr` with SinkGD. Changing
 uv run --no-sync torchrun --standalone --nproc_per_node=4 -m trainer.pretrain --cfg sinkgd
 
 uv run --no-sync torchrun --standalone --nproc_per_node=4 -m trainer.pretrain --cfg sinkgd -- \
-  optimizer.name=mixed-sinkgd optimizer.normalization=simultaneous \
+  optimizer=mixed-sinkgd optimizer.normalization=simultaneous \
   optimizer.sinkhorn_steps=5 optimizer.final_row_pass=true
 ```
 
 Use `training.strategy=ddp` for DDP, or one process with
 `training.strategy=none` for single-GPU training.
 
-## :compass: Practical usage and benchmarking guidelines
-
-
-For fair and informative benchmarks, we recommend aligning optimization settings across methods as closely as possible.
-
-- **RMSNorm alignment**: in our paper, we tune the AdamW baseline and align RMSNorms of Muon and ARO to AdamW, similar to Muon Moonlight. To reproduce results/behavior in the paper, as well as for easier hyperparameter transfer, we recommend keeping RMSNorm aligned when comparing methods.
-- **When benchmarking without RMSNorm**: optimization dynamics may differ, so the learning rate should be re-tuned accordingly. In practice, this often requires a substantially different (often larger) learning rate than in RMSNorm-based settings.
-- **Variance adaptation parity**: when comparing against optimizers that explicitly use variance adaptation, we recommend applying the corresponding variance-adaptation mechanism to ARO as well, so the comparison better isolates optimizer behavior rather than differences in adaptation features.
-- **SCQR for faster rotation updates**: in our work, we proposed to use SCQR instead of a standard QR to accelerate computation. The ARO constructors and example YAMLs use `rotation_jitter=1e-9`; standalone `SCQRUpdate` and `SCQRConfig` default to `1e-7`. If you encounter very frequent fallbacks to QR or other numerical issues, especially for larger models, we recommend trying `1e-7` instead.
-
-    You can adjust this directly in the provided configs:
-
-    ```yaml
-    optimizer:
-        u_processor:
-            name: scqr
-            rotation_jitter: 1e-7
-    ```
-
-    For readers interested in related follow-up discussions and extensions, Kexue.fm has a nice series, for example https://kexue.fm/archives/11654 and https://kexue.fm/archives/11710.
-
-## RoM: Rotated Manifold Optimization for low-rank adaptation
+## F. RoM: Rotated Manifold Optimization for low-rank adaptation
 
 RoM extends matrix optimizers to the manifold of fixed-rank matrices by combining
 rotation and normalization, accounting for the gauge symmetry of low-rank
@@ -287,7 +538,7 @@ The implementation is available through `aro.lora.FixedRankRGD`. It optimizes th
 the individual factors. The implementation uses low-rank gradient projections and
 a small SVD retraction, without materializing a dense adapter gradient.
 
-**Quick start.** Install `aro` as above, freeze the base model, replace its linear
+**Quick start.** Install `aro` as in the [Quick start](#1-use-aro-in-your-own-training-loop), freeze the base model, replace its linear
 layers with `apply_adb_lora`, and pass the adapter modules (not their parameters)
 to `FixedRankRGD`. Enable input gradients, then use `zero_grad()`, `backward()`,
 and `step()` in your training loop. The example below uses plain Riemannian gradient
@@ -364,62 +615,13 @@ base weights, but factors must be excluded from sharding at every level, placed 
 the compute device, and synchronized before constructing the optimizer. Sharded
 adapter factors are not supported.
 
-## :package: Dependencies
+## G. Practical usage and benchmarking guidelines
 
-The only direct python dependency of `aro` library is `torch`.
+For fair and informative benchmarks, we recommend aligning optimization settings across methods as closely as possible.
 
---------------------------------------------
+- **RMSNorm alignment**: in our paper, we tune the AdamW baseline and align RMSNorms of Muon and ARO to AdamW, similar to Muon Moonlight. To reproduce results/behavior in the paper, as well as for easier hyperparameter transfer, we recommend keeping RMSNorm aligned when comparing methods.
+- **When benchmarking without RMSNorm**: optimization dynamics may differ, so the learning rate should be re-tuned accordingly. In practice, this often requires a substantially different (often larger) learning rate than in RMSNorm-based settings.
+- **Variance adaptation parity**: when comparing against optimizers that explicitly use variance adaptation, we recommend applying the corresponding variance-adaptation mechanism to ARO as well, so the comparison better isolates optimizer behavior rather than differences in adaptation features.
+- **SCQR for faster rotation updates**: in our work, we proposed to use SCQR instead of a standard QR to accelerate computation. The ARO constructors and example configs use `rotation_jitter=1e-9`; standalone `SCQRUpdate` and `SCQRConfig` default to `1e-7`. If you encounter very frequent fallbacks to QR or other numerical issues, especially for larger models, we recommend trying `1e-7` instead, e.g. with the trainer override `optimizer.u_processor.rotation_jitter=1e-7` or `SCQRUpdate(rotation_jitter=1e-7)` in your own code. `chol-qr` / `CholQrUpdate` are aliases of SCQR.
 
-# :mountain: Contributing
-
-Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details on contributing to this project.
-
-# :triangular_ruler: Conventions
-
-Consider reading [.github/copilot-instructions.md](.github/copilot-instructions.md) for a summary of the repository structure and coding style.
-
-# :balance_scale: Trademarks
-
-This project may contain trademarks or logos for projects, products, or services. Authorized use of Microsoft
-trademarks or logos is subject to and must follow
-[Microsoft's Trademark & Brand Guidelines](https://www.microsoft.com/en-us/legal/intellectualproperty/trademarks/usage/general).
-Use of Microsoft trademarks or logos in modified versions of this project must not cause confusion or imply Microsoft sponsorship.
-Any use of third-party trademarks or logos are subject to those third-party's policies.
-
-
-# :bookmark_tabs: Citation
-
-If you use ARO in your research, please cite:
-
-```bibtex
-@article{gong2026aro,
-  title={ARO: A New Lens On Matrix Optimization For Large Models},
-  author={Gong, Wenbo and Zazo, Javier and Luo, Qijun and Wang, Puqian and Hensman, James and Ma, Chao},
-  journal={arXiv preprint arXiv:2602.09006},
-  year={2026}
-}
-```
-
-If you use RoM for low-rank adaptation, please cite:
-
-```bibtex
-@article{ding2026rom,
-  title={Rotated Manifold Optimization for Low-Rank Adaptation},
-  author={Ding, Yuhui and Zazo, Javier and Hensman, James},
-  journal={arXiv preprint arXiv:2609.34264},
-  year={2026},
-  doi={10.48550/arXiv.2609.34264},
-  url={https://arxiv.org/abs/2609.34264}
-}
-```
-
-For the SinkGD algorithm, please also cite:
-
-```bibtex
-@article{scetbon2025gradient,
-  title={Gradient multi-normalization for stateless and scalable llm training},
-  author={Scetbon, Meyer and Ma, Chao and Gong, Wenbo and Meeds, Edward},
-  journal={arXiv preprint arXiv:2502.06742},
-  year={2025}
-}
-```
+    For readers interested in related follow-up discussions and extensions, Kexue.fm has a nice series, for example https://kexue.fm/archives/11654 and https://kexue.fm/archives/11710.

@@ -84,7 +84,9 @@ def rng_state_capture() -> dict[str, Any]:
     }
     if np is not None:
         try:
-            state["numpy"] = np.random.get_state()  # noqa: NPY002
+            name, keys, pos, has_gauss, cached_gaussian = np.random.get_state()  # noqa: NPY002
+            # Builtin types keep checkpoints loadable with torch.load(weights_only=True).
+            state["numpy"] = (name, keys.tolist(), pos, has_gauss, cached_gaussian)
         except Exception:
             print(f"[RANK {rank} Warning] Failed to get numpy RNG state")
             state["numpy"] = None
@@ -107,7 +109,7 @@ def rng_state_restore(state: dict[str, Any]) -> None:
         print(f"[RANK {rank} Warning] Failed to restore python RNG state")
     if "torch_cpu" in state and state["torch_cpu"] is not None:
         print(f"[RANK {rank}] Restoring torch_cpu RNG state")
-        torch.random.set_rng_state(state["torch_cpu"])
+        torch.random.set_rng_state(state["torch_cpu"].cpu())  # checkpoints may map it to GPU
     else:
         print(f"[RANK {rank} Warning] Failed to restore torch_cpu RNG state")
     if np is not None and "numpy" in state and state["numpy"] is not None:
@@ -119,7 +121,7 @@ def rng_state_restore(state: dict[str, Any]) -> None:
             pass
     if torch.cuda.is_available() and "cuda" in state and state["cuda"] is not None:
         print(f"[RANK {rank}] Restoring cuda RNG state")
-        torch.cuda.set_rng_state(state["cuda"])  # current device
+        torch.cuda.set_rng_state(state["cuda"].cpu())  # current device
     else:
         print(f"[RANK {rank} Warning] Failed to set cuda RNG state")
         pass

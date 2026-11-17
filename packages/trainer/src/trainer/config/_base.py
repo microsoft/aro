@@ -52,7 +52,9 @@ class TrainingConfig:
     log_interval: int = 10
     eval_interval: int = 1000
     checkpoint_interval: int = 1000  # 0 for skipping saving
-    checkpoint_path: Path = Path("outputs/checkpoints")
+    # Directory holding this run's checkpoints and the `latest` pointer used to resume. None
+    # derives a per-run directory under compute_env.output_dir from the run's configuration.
+    checkpoint_path: Path | None = None
 
 
 @dataclass(frozen=True)

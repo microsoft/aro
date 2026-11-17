@@ -43,6 +43,11 @@ UPDATE_U = Literal["scqr", "chol-qr", "polar"]
 MODEL_NAME = Literal["nanogpt", "nanochat"]
 ARO_CONFIGS = AroSinkhornConfig | AroAdamConfig | AroSignConfig
 OPT_CONFIGS = ARO_CONFIGS | AdamWConfig | MuonConfig | SinkGDConfig
+# Optimizer names accepted by the trainer (each has a recipe in config/optimizer/<name>.yaml):
+# - "adamw": AdamW on every trainable parameter.
+# - "<optimizer>": the matrix optimizer on every trainable 2D parameter, including the token
+#   embedding and LM head; 1D parameters use AdamW (SinkGD: every non-matrix parameter).
+# - "mixed-<optimizer>": as above, but the token embedding and LM head also use AdamW.
 OPTIMIZERS = Literal[
     "adamw",
     "arosinkhorn",
@@ -201,11 +206,17 @@ class _FullOptimizerContainer(apps.Container):
 
     @apps.service(_PrivateServices.optimizers("adamw"))
     def _adamw_optimizer(self) -> list[torch.optim.Optimizer]:
+        assert isinstance(self._optim_cfg, AdamWConfig)
         model = self._model_container.get(ModelServices.DISTRIBUTED_MODEL)
         model = cast(nn.Module, model.module if isinstance(model, DDP) else model)
         params = [p for p in model.parameters() if p.requires_grad]
-        lr = self._optim_cfg.lr
-        optimizer = torch.optim.AdamW(params, lr=lr, betas=(0.9, 0.95), weight_decay=0.1)
+        optimizer = torch.optim.AdamW(
+            params,
+            lr=self._optim_cfg.lr,
+            betas=self._optim_cfg.betas,
+            weight_decay=self._optim_cfg.weight_decay,
+            eps=self._optim_cfg.eps,
+        )
         return [optimizer]
 
     @apps.service(_PrivateServices.optimizers("arosinkhorn"))

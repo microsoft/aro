@@ -1,0 +1,6 @@
+# Same as sinkgd, but the token embedding and LM head are trained with the AdamW fallback.
+defaults:
+  - sinkgd
+  - _self_
+
+name: mixed-sinkgd
