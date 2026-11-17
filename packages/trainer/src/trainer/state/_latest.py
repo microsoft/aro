@@ -18,10 +18,15 @@ def latest_checkpoint(checkpoint_dir: Path) -> Path | None:
 
 
 def mark_latest(checkpoint_dir: Path, checkpoint: Path) -> None:
-    """Points `<checkpoint_dir>/latest` at `checkpoint` once every rank has finished writing it."""
+    """Points `<checkpoint_dir>/latest` at `checkpoint` once every rank has finished writing it.
+
+    Returns on every rank only after the pointer is updated, so all ranks can read it afterwards.
+    """
     if dist.is_initialized():
         dist.barrier()
     if int(os.getenv("RANK", "0")) == 0:
         tmp = checkpoint_dir / f"{LATEST}.tmp"
         tmp.write_text(checkpoint.name)
         tmp.replace(checkpoint_dir / LATEST)  # atomic: never leaves a partial pointer
+    if dist.is_initialized():
+        dist.barrier()

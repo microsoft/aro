@@ -9,7 +9,8 @@ import torch.multiprocessing as mp
 from torch import Tensor, nn
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import fully_shard
-from torch.distributed.tensor import DTensor, distribute_tensor
+from torch.distributed.tensor import DTensor
+from torch.nn.parallel import DistributedDataParallel
 
 from aro.optim import AroAdam, AroSinkhorn
 from trainer.config import ConfigContainer, ConfigServices
@@ -90,21 +91,25 @@ def _full(value: Tensor) -> Tensor:
 
 def _build(strategy: str, seed: int) -> tuple[nn.Module, AroAdam, TrainingState]:
     torch.manual_seed(seed)
-    model = nn.Sequential(*[nn.Linear(i, o, bias=False) for i, o in _LAYERS]).cuda()
+    model: nn.Module = nn.Sequential(*[nn.Linear(i, o, bias=False) for i, o in _LAYERS]).cuda()
     if strategy == "fsdp2":
         fully_shard(model, mesh=init_device_mesh("cuda", (dist.get_world_size(),)))
+    else:
+        model = DistributedDataParallel(model, device_ids=[torch.cuda.current_device()])
     optimizer = AroAdam(list(model.parameters()), lr=0.05, alpha=0.2, betas=(0.0, 0.95))
     state_type = ShardedState if strategy == "fsdp2" else FullState
     return model, optimizer, state_type(0, model, [optimizer], [])
 
 
+def _backward(model: nn.Module, index: int) -> None:
+    # Each rank trains on different data; DDP/FSDP2 synchronize the gradients in backward.
+    generator = torch.Generator().manual_seed(1000 * index + dist.get_rank())
+    inputs = torch.randn(4, _LAYERS[0][0], generator=generator).cuda()
+    model(inputs).square().mean().backward()
+
+
 def _step(model: nn.Module, optimizer: AroAdam, index: int) -> None:
-    generator = torch.Generator().manual_seed(index)
-    for parameter in model.parameters():
-        gradient = torch.randn(parameter.shape, generator=generator).cuda()
-        if isinstance(parameter, DTensor):
-            gradient = distribute_tensor(gradient, parameter.device_mesh, parameter.placements)
-        parameter.grad = gradient
+    _backward(model, index)
     optimizer.step()
     optimizer.zero_grad()
 
@@ -137,6 +142,13 @@ def _continuation_worker(
         assert latest is not None and latest == checkpoint
         restored.resume_from_checkpoint_if_exists(latest)
         assert restored.step == 2
+        if strategy == "ddp":
+            # A newly constructed DDP wrapper's first gradient all-reduce can round differently
+            # (~1e-10) from later ones even for identical local gradients, and ARO's normalized
+            # updates amplify that on this tiny rank-deficient problem. One discarded synchronized
+            # backward makes both models reduce gradients identically.
+            _backward(restored_model, 0)
+            restored_optimizer.zero_grad()
         for index in range(2, 4):
             _step(model, optimizer, index)
             _step(restored_model, restored_optimizer, index)
@@ -154,8 +166,9 @@ def _continuation_worker(
 def test_distributed_resume_continues_like_uninterrupted_training(
     tmp_path: Path, strategy: str
 ) -> None:
-    # Under DDP, ARO keeps rotation and Adam base state only on each matrix's owner rank, so
-    # the resumed updates match only if every rank's optimizer state is restored.
+    # DDP/FSDP2-wrapped training with per-rank data. Under DDP, ARO keeps rotation and Adam
+    # base state only on each matrix's owner rank, so the resumed updates match only if every
+    # rank's optimizer state is restored.
     world_size = 3
     init_method = f"file://{tmp_path / 'rendezvous'}"
     args = (world_size, init_method, strategy, str(tmp_path / "run"))
